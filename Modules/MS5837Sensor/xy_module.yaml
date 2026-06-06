@@ -1,0 +1,15 @@
+name: MS5837Sensor
+include: MS5837Sensor.hpp
+description: BlueRobotics MS5837 30BA / 02BA pressure & depth sensor (STM32 HAL).
+
+args:
+  fluid_density:
+    type: int
+    required: false
+    default: 997
+    description: 流体密度 kg/m^3。淡水 997，海水 1029。
+  read_period_ms:
+    type: int
+    required: false
+    default: 100
+    description: 主循环里至少多少毫秒采样一次。建议 >= 50ms，因为单次采样约阻塞 40ms。

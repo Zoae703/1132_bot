@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "DAP-Link 调试 (OpenOCD)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "openocd",
+            "device": "STM32F407IG",
+            "configFiles": [
+                "${workspaceFolder}/openocd.cfg"
+            ],
+            "svdFile": "${workspaceFolder}/tools/STM32F407.svd",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "CMake: 编译",
+            "postLaunchCommands": [
+                "monitor reset init",
+                "monitor halt"
+            ],
+            "showDevDebugOutput": "raw"
+        }
+    ]
+}

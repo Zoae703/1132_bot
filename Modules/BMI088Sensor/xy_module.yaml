@@ -1,0 +1,20 @@
+name: BMI088Sensor
+include: BMI088Sensor.hpp
+description: BMI088 六轴 IMU（陀螺仪 + 加速度计），阻塞 SPI 读取，适用于 RoboMaster 开发板 C 型。
+
+args:
+  read_period_ms:
+    type: int
+    required: false
+    default: 5
+    description: 主循环里至少多少毫秒采样一次（默认 200Hz）。
+  accel_range:
+    type: string
+    required: false
+    default: "3G"
+    description: 加速度计量程，可选 3G / 6G / 12G / 24G。
+  gyro_range:
+    type: string
+    required: false
+    default: "2000"
+    description: 陀螺仪量程 (dps)，可选 2000 / 1000 / 500 / 250 / 125。

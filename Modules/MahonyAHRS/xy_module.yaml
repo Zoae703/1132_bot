@@ -1,0 +1,20 @@
+name: MahonyAHRS
+include: MahonyAHRS.hpp
+description: Mahony AHRS sensor fusion (gyro+accel+mag -> quaternion/Euler). No hardware dependency.
+
+args:
+  sample_freq:
+    type: float
+    required: false
+    default: 200.0
+    description: 主循环采样频率 Hz。
+  kp:
+    type: float
+    required: false
+    default: 5.0
+    description: 比例增益。
+  ki:
+    type: float
+    required: false
+    default: 0.0
+    description: 积分增益。

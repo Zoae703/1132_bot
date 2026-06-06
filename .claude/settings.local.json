@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"C:\\\\eide_tool\\\\OpenOCD_V2.0.6\\\\bin\\\\openocd.exe\" -s \"C:\\\\eide_tool\\\\OpenOCD_V2.0.6\\\\share\\\\openocd\\\\scripts\" -f interface/cmsis-dap.cfg -f target/stm32f4x.cfg -c \"exit\" 2>&1 | Select-Object -First 10)",
+      "PowerShell($env:CUBE_BUNDLE_PATH)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(code *)"
+    ]
+  }
+}

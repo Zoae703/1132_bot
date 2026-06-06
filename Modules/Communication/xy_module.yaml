@@ -1,0 +1,3 @@
+name: Communication
+include: Communication.hpp
+description: USART6 命令协议解析，写目标/标志到 DataBus（不直接控制 PWM）。

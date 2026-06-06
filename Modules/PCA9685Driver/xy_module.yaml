@@ -1,0 +1,10 @@
+name: PCA9685Driver
+include: PCA9685Driver.hpp
+description: PCA9685 16 路 PWM 驱动板 (I2C2, 0x80, 50Hz)，输出 8 路推进器 PWM。
+
+args:
+  frequency:
+    type: float
+    required: false
+    default: 50
+    description: PWM 输出频率 Hz。

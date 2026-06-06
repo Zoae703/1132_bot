@@ -1,0 +1,56 @@
+project:
+  name: 1132_bot
+  loop_sleep_ms: 5
+  flavor: stm32_hal
+
+modules:
+  - id: databus
+    type: DataBus
+    include: DataBus.hpp
+
+  - id: imu
+    type: BMI088Sensor
+    include: BMI088Sensor.hpp
+    args:
+      read_period_ms: 5
+      accel_range: "3G"
+      gyro_range: "2000"
+
+  - id: depth_sensor
+    type: MS5837Sensor
+    include: MS5837Sensor.hpp
+    args:
+      fluid_density: 997
+      read_period_ms: 100
+
+  - id: ist8310
+    type: IST8310Sensor
+    include: IST8310Sensor.hpp
+    args:
+      read_period_ms: 10
+
+  - id: ahrs
+    type: MahonyAHRS
+    include: MahonyAHRS.hpp
+    args:
+      sample_freq: 200.0
+      kp: 5.0
+      ki: 0.0
+
+  - id: pid
+    type: PIDController
+    include: PIDController.hpp
+
+  - id: pca9685
+    type: PCA9685Driver
+    include: PCA9685Driver.hpp
+    args:
+      frequency: 50
+
+  - id: motor_control
+    type: MotorControl
+    include: MotorControl.hpp
+
+  - id: communication
+    type: Communication
+    include: Communication.hpp

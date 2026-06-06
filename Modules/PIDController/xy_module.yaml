@@ -1,0 +1,3 @@
+name: PIDController
+include: PIDController.hpp
+description: Generic PID controller (pure computation, no hardware dependency).

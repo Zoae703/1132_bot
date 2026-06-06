@@ -1,0 +1,3 @@
+name: MotorControl
+include: MotorControl.hpp
+description: 8 路推进器 PID 级联 + 推力分配。读 DataBus 传感器/目标，写 robot.pwm[8]。
