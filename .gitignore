@@ -1,3 +1,42 @@
-build
+# Build output
+build/
+
+# CubeMX
 mx.scratch
-!.settings
+.settings/
+
+# IDE
+.vscode/
+.idea/
+*.uvguix.*
+*.scvd
+
+# Editor / OS
+*.swp
+*~
+*.bak
+Thumbs.db
+.DS_Store
+
+# Compiled binaries
+*.elf
+*.bin
+*.hex
+*.map
+*.out
+
+# Object & dependency files
+*.o
+*.obj
+*.d
+*.su
+
+# CMake generated (project root)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Clangd index
+.clangd/
+.cache/
