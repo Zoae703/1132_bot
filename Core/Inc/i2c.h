@@ -29,6 +29,7 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
+#include <stdbool.h>
 
 /* USER CODE END Includes */
 
@@ -44,6 +45,9 @@ void MX_I2C2_Init(void);
 void MX_I2C3_Init(void);
 
 /* USER CODE BEGIN Prototypes */
+void I2C2_BusMutexInit(void);
+bool I2C2_BusLock(uint32_t timeout_ms);
+void I2C2_BusUnlock(void);
 
 /* USER CODE END Prototypes */
 

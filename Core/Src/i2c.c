@@ -21,6 +21,42 @@
 #include "i2c.h"
 
 /* USER CODE BEGIN 0 */
+#include "cmsis_os.h"
+
+static osMutexId_t i2c2_bus_mutex = NULL;
+static const osMutexAttr_t i2c2_bus_mutex_attributes = {
+  .name = "i2c2Bus",
+};
+
+void I2C2_BusMutexInit(void)
+{
+  if (i2c2_bus_mutex == NULL)
+  {
+    i2c2_bus_mutex = osMutexNew(&i2c2_bus_mutex_attributes);
+    if (i2c2_bus_mutex == NULL)
+    {
+      Error_Handler();
+    }
+  }
+}
+
+bool I2C2_BusLock(uint32_t timeout_ms)
+{
+  if (i2c2_bus_mutex == NULL)
+  {
+    Error_Handler();
+    return false;
+  }
+  return osMutexAcquire(i2c2_bus_mutex, timeout_ms) == osOK;
+}
+
+void I2C2_BusUnlock(void)
+{
+  if (i2c2_bus_mutex != NULL)
+  {
+    (void)osMutexRelease(i2c2_bus_mutex);
+  }
+}
 
 /* USER CODE END 0 */
 

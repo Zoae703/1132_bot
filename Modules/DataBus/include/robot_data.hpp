@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 
+inline constexpr uint32_t ROBOT_MANUAL_PWM_TIMEOUT_MS = 500U;
+
 struct RobotData {
     // === IMU raw data (written by BMI088Sensor, IST8310Sensor) ===
     float accel[3] = {0};     // m/s²
@@ -34,6 +36,8 @@ struct RobotData {
     // === Control flags (written by Communication) ===
     bool float_enabled = false;     // PID float control ON/OFF
     bool angle_enabled = false;     // Yaw angle hold ON/OFF
+    bool manual_pwm_enabled = false; // Direct PWM test mode with timeout
+    uint32_t manual_pwm_last_ms = 0;
     uint8_t motion_state = 0;       // 0=STOP, 1=FLOAT, 2=FRONT, 3=BACK, 4=LEFT, 5=RIGHT, 6=CLOCKWISE, 7=ANTICLOCKWISE
 
     // === System ===

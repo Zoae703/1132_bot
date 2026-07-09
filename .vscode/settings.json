@@ -1,22 +1,6 @@
 {
-    "cmake.cmakePath": "C:\\ST\\STM32CubeCLT_1.20.0\\CMake\\bin\\cmake.exe",
-    "cmake.preferredGenerators": [
-        "Ninja"
-    ],
-
-    // ── CMake Tools: 额外构建目标 ──
-    // Ctrl+Shift+P → "CMake: Set Build Target" → 选 "flash" 即可烧录
-    // 或在底部状态栏点击构建目标切换按钮
-    "cmake.buildTask": true,
-
-    // ── Cortex-Debug: OpenOCD 配置 ──
-    "cortex-debug.openocdPath": "C:\\eide_tool\\OpenOCD_V2.0.6\\bin\\openocd.exe",
-    "cortex-debug.armToolchainPath": "C:\\ST\\STM32CubeCLT_1.20.0\\GNU-tools-for-STM32\\bin",
-    "cortex-debug.armToolchainPrefix": "arm-none-eabi",
-    "cortex-debug.variableUseNaturalFormat": true,
-
-    "stm32cube-ide-clangd.arguments": [
-        "--query-driver=C:\\ST\\STM32CubeCLT_1.20.0\\GNU-tools-for-STM32\\bin\\arm-none-eabi-gcc*",
-        "--query-driver=C:\\ST\\STM32CubeCLT_1.20.0\\GNU-tools-for-STM32\\bin\\arm-none-eabi-g++*"
-    ]
+  "cortex-debug.armToolchainPath": "/usr/bin",
+  "cortex-debug.armToolchainPrefix": "arm-none-eabi",
+  "cortex-debug.openocdPath": "/home/zoae/.local/xpack-openocd/bin/openocd",
+  "cortex-debug.variableUseNaturalFormat": true
 }

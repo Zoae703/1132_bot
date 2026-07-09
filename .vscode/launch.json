@@ -1,25 +1,54 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "DAP-Link 调试 (OpenOCD)",
-            "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
-            "request": "launch",
-            "type": "cortex-debug",
-            "servertype": "openocd",
-            "device": "STM32F407IG",
-            "configFiles": [
-                "${workspaceFolder}/openocd.cfg"
-            ],
-            "svdFile": "${workspaceFolder}/tools/STM32F407.svd",
-            "runToEntryPoint": "main",
-            "preLaunchTask": "CMake: 编译",
-            "postLaunchCommands": [
-                "monitor reset init",
-                "monitor halt"
-            ],
-            "showDevDebugOutput": "raw"
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DAPLink OpenOCD Debug",
+      "type": "cortex-debug",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+      "servertype": "openocd",
+      "serverpath": "/home/zoae/.local/xpack-openocd/bin/openocd",
+      "configFiles": [
+        "${workspaceFolder}/openocd.cfg"
+      ],
+      "gdbPath": "/usr/bin/gdb-multiarch",
+      "showDevDebugOutput": "raw",
+      "overrideLaunchCommands": [
+        "monitor reset halt",
+        "load",
+        "monitor reset halt",
+        "tbreak main",
+        "continue"
+      ],
+      "sourceFileMap": {
+        "C:/Users/40713/Desktop/1132/origin_bot/1132_bot": "/home/zoae/stm32_projects/1132_bot"
+      }
+    },
+    {
+      "name": "STM32F407 DAPLink OpenOCD Debug",
+      "type": "cortex-debug",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+      "servertype": "openocd",
+      "serverpath": "/home/zoae/.local/xpack-openocd/bin/openocd",
+      "configFiles": [
+        "${workspaceFolder}/.vscode/stm32/openocd_stm32f407_daplink.cfg"
+      ],
+      "gdbPath": "/usr/bin/gdb-multiarch",
+      "showDevDebugOutput": "raw",
+      "overrideLaunchCommands": [
+        "monitor reset halt",
+        "load",
+        "monitor reset halt",
+        "tbreak main",
+        "continue"
+      ],
+      "sourceFileMap": {
+        "C:/Users/40713/Desktop/1132/origin_bot/1132_bot": "${workspaceFolder}",
+        "C:\\Users\\40713\\Desktop\\1132\\origin_bot\\1132_bot": "${workspaceFolder}"
+      }
+    }
+  ]
 }

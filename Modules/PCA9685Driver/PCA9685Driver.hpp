@@ -1,6 +1,8 @@
 #pragma once
 #include "include/PCA9685.h"
 #include "DataBus.hpp"
+#include "FreeRTOS.h"
+#include "task.h"
 
 extern "C" I2C_HandleTypeDef hi2c2;
 
@@ -16,7 +18,12 @@ public:
     }
 
     void Update() {
-        PCA9685_SetAllPWM(robot.pwm);
+        int32_t pwm[8];
+        taskENTER_CRITICAL();
+        for (int i = 0; i < 8; i++)
+            pwm[i] = robot.pwm[i];
+        taskEXIT_CRITICAL();
+        PCA9685_SetAllPWM(pwm);
     }
 
 private:

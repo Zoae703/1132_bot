@@ -9,6 +9,7 @@
  */
 
 #include "MS5837.h"
+#include "i2c.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -51,12 +52,29 @@ static const uint16_t MS5837_30BA_MIN_SENSITIVITY  = 26000;
  */
 namespace {
 
+bool lock_bus_if_needed(I2C_HandleTypeDef *h) {
+    if (h == &hi2c2) {
+        return I2C2_BusLock(MS5837_HAL_TIMEOUT_MS);
+    }
+    return true;
+}
+
+void unlock_bus_if_needed(I2C_HandleTypeDef *h) {
+    if (h == &hi2c2) {
+        I2C2_BusUnlock();
+    }
+}
+
 bool i2c_write_cmd(I2C_HandleTypeDef *h, uint8_t cmd) {
     if (h == nullptr) {
         return false;
     }
+    if (!lock_bus_if_needed(h)) {
+        return false;
+    }
     HAL_StatusTypeDef st = HAL_I2C_Master_Transmit(
         h, MS5837_HAL_ADDR, &cmd, 1, MS5837_HAL_TIMEOUT_MS);
+    unlock_bus_if_needed(h);
     return (st == HAL_OK);
 }
 
@@ -64,8 +82,12 @@ bool i2c_read_bytes(I2C_HandleTypeDef *h, uint8_t *buf, uint16_t n) {
     if (h == nullptr || buf == nullptr) {
         return false;
     }
+    if (!lock_bus_if_needed(h)) {
+        return false;
+    }
     HAL_StatusTypeDef st = HAL_I2C_Master_Receive(
         h, MS5837_HAL_ADDR, buf, n, MS5837_HAL_TIMEOUT_MS);
+    unlock_bus_if_needed(h);
     return (st == HAL_OK);
 }
 

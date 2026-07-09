@@ -1,22 +1,45 @@
 #include "PCA9685.h"
+#include "i2c.h"
 #include <cmath>
 
 #define LED0_ON_H  0x07
 #define LED0_OFF_L 0x08
 #define LED0_OFF_H 0x09
+#define PCA9685_HAL_TIMEOUT_MS 10000U
 
 static I2C_HandleTypeDef* pca_i2c = nullptr;
 
+static bool PCA9685_LockBus(void) {
+    if (pca_i2c == &hi2c2) {
+        return I2C2_BusLock(PCA9685_HAL_TIMEOUT_MS);
+    }
+    return true;
+}
+
+static void PCA9685_UnlockBus(void) {
+    if (pca_i2c == &hi2c2) {
+        I2C2_BusUnlock();
+    }
+}
+
 static uint8_t PCA9685_Read(uint8_t reg) {
     uint8_t tx = reg, buf = 0;
-    HAL_I2C_Master_Transmit(pca_i2c, PCA9685_ADDR, &tx, 1, 10000);
-    HAL_I2C_Master_Receive(pca_i2c, PCA9685_ADDR, &buf, 1, 10000);
+    if (!PCA9685_LockBus()) {
+        return 0;
+    }
+    HAL_I2C_Master_Transmit(pca_i2c, PCA9685_ADDR, &tx, 1, PCA9685_HAL_TIMEOUT_MS);
+    HAL_I2C_Master_Receive(pca_i2c, PCA9685_ADDR, &buf, 1, PCA9685_HAL_TIMEOUT_MS);
+    PCA9685_UnlockBus();
     return buf;
 }
 
 static void PCA9685_Write(uint8_t reg, uint8_t data) {
     uint8_t tx[2] = {reg, data};
-    HAL_I2C_Master_Transmit(pca_i2c, PCA9685_ADDR, tx, 2, 10000);
+    if (!PCA9685_LockBus()) {
+        return;
+    }
+    HAL_I2C_Master_Transmit(pca_i2c, PCA9685_ADDR, tx, 2, PCA9685_HAL_TIMEOUT_MS);
+    PCA9685_UnlockBus();
 }
 
 static void PCA9685_SetFreq(float freq) {

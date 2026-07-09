@@ -25,6 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "i2c.h"
 #include "robot_tasks.h"
 
 /* USER CODE END Includes */
@@ -69,6 +70,13 @@ const osThreadAttr_t commTask_attributes = {
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for depthTask */
+osThreadId_t depthTaskHandle;
+const osThreadAttr_t depthTask_attributes = {
+  .name = "depthTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -89,6 +97,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
+  I2C2_BusMutexInit();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -106,12 +115,31 @@ void MX_FREERTOS_Init(void) {
   /* Create the thread(s) */
   /* creation of sensorTask */
   sensorTaskHandle = osThreadNew(SensorTaskFunc, NULL, &sensorTask_attributes);
+  if (sensorTaskHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* creation of controlTask */
   controlTaskHandle = osThreadNew(ControlTaskFunc, NULL, &controlTask_attributes);
+  if (controlTaskHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* creation of commTask */
   commTaskHandle = osThreadNew(CommTaskFunc, NULL, &commTask_attributes);
+  if (commTaskHandle == NULL)
+  {
+    Error_Handler();
+  }
+
+  /* creation of depthTask */
+  depthTaskHandle = osThreadNew(DepthTaskFunc, NULL, &depthTask_attributes);
+  if (depthTaskHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */

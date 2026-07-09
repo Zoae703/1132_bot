@@ -53,6 +53,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+volatile uint32_t g_clock_error_step = 0;
+volatile HAL_StatusTypeDef g_clock_hal_status = HAL_OK;
+volatile uint32_t g_rcc_cr = 0;
+volatile uint32_t g_rcc_cfgr = 0;
+volatile uint32_t g_flash_acr = 0;
 
 /* USER CODE END PV */
 
@@ -110,10 +115,11 @@ int main(void)
   MX_I2C3_Init();
   MX_SPI2_Init();
   MX_TIM4_Init();
-  MX_IWDG_Init();
   MX_USB_DEVICE_Init();
 
   /* USER CODE BEGIN 2 */
+  /* IWDG must start after XYRobotSetup() completes in SensorTaskFunc.
+     Do not call MX_IWDG_Init() during early peripheral initialization. */
 
   /* USER CODE END 2 */
 
@@ -161,8 +167,13 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 7;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  g_clock_hal_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+  if (g_clock_hal_status != HAL_OK)
   {
+    g_clock_error_step = 1;
+    g_rcc_cr = RCC->CR;
+    g_rcc_cfgr = RCC->CFGR;
+    g_flash_acr = FLASH->ACR;
     Error_Handler();
   }
 
@@ -175,8 +186,13 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+  g_clock_hal_status = HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5);
+  if (g_clock_hal_status != HAL_OK)
   {
+    g_clock_error_step = 2;
+    g_rcc_cr = RCC->CR;
+    g_rcc_cfgr = RCC->CFGR;
+    g_flash_acr = FLASH->ACR;
     Error_Handler();
   }
 }
@@ -214,8 +230,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
   while (1)
   {
   }

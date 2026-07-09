@@ -6,6 +6,7 @@
 
 static constexpr uint32_t kCommRxFlag = 1U << 0;
 static volatile bool robot_initialized = false;
+static volatile bool iwdg_initialized = false;
 
 extern "C" osThreadId_t commTaskHandle;
 
@@ -14,12 +15,13 @@ extern "C" void SensorTaskFunc(void *argument)
   (void)argument;
 
   XYRobotSetup();
+  MX_IWDG_Init();
+  iwdg_initialized = true;
   robot_initialized = true;
 
   for (;;)
   {
     imu.Update();
-    depth_sensor.Update();
     ist8310.Update();
     ahrs.Update();
     osDelay(5);
@@ -39,7 +41,10 @@ extern "C" void ControlTaskFunc(void *argument)
   {
     motor_control.Update();
     pca9685.Update();
-    HAL_IWDG_Refresh(&hiwdg);
+    if (iwdg_initialized)
+    {
+      HAL_IWDG_Refresh(&hiwdg);
+    }
     osDelay(5);
   }
 }
@@ -60,6 +65,22 @@ extern "C" void CommTaskFunc(void *argument)
     {
       comm.Update();
     }
+  }
+}
+
+extern "C" void DepthTaskFunc(void *argument)
+{
+  (void)argument;
+
+  while (!robot_initialized)
+  {
+    osDelay(1);
+  }
+
+  for (;;)
+  {
+    depth_sensor.Update();
+    osDelay(10);
   }
 }
 

@@ -1,5 +1,8 @@
 #include "motor_control.h"
+#include "main.h"
 #include "robot_data.hpp"
+#include "FreeRTOS.h"
+#include "task.h"
 #include <cmath>
 
 #define MC_PI 3.14159265358979323846f
@@ -11,6 +14,11 @@ static float normalize_angle(float angle) {
     angle = fmodf(angle + MC_PI, 2.0f * MC_PI);
     if (angle < 0) angle += 2.0f * MC_PI;
     return angle - MC_PI;
+}
+
+static void set_all_pwm_neutral(int32_t neutral) {
+    for (int i = 0; i < 8; i++)
+        robot.pwm[i] = neutral;
 }
 
 void MotorControl::Init() {
@@ -62,7 +70,11 @@ void MotorControl::Init() {
 
 void MotorControl::float_ctrl() {
     // Depth PID at full rate (depth_m -> cm)
-    pwm_comp_.depth = depth_pid_.PIDCalc(robot.target_depth_cm, robot.depth_m * 100.0f);
+    float depth_m;
+    taskENTER_CRITICAL();
+    depth_m = robot.depth_m;
+    taskEXIT_CRITICAL();
+    pwm_comp_.depth = depth_pid_.PIDCalc(robot.target_depth_cm, depth_m * 100.0f);
 
     // Outer loops at ~66Hz (every 3rd cycle)
     if (robot.loop_count % 3 == 0) {
@@ -140,11 +152,38 @@ void MotorControl::horizontal_allocation() {
 void MotorControl::Update() {
     robot.loop_count++;
 
+    bool manual_pwm_enabled;
+    uint32_t manual_pwm_last_ms;
+    taskENTER_CRITICAL();
+    manual_pwm_enabled = robot.manual_pwm_enabled;
+    manual_pwm_last_ms = robot.manual_pwm_last_ms;
+    taskEXIT_CRITICAL();
+
+    if (manual_pwm_enabled) {
+        uint32_t elapsed_ms = HAL_GetTick() - manual_pwm_last_ms;
+        if (elapsed_ms <= ROBOT_MANUAL_PWM_TIMEOUT_MS) {
+            return;
+        }
+
+        taskENTER_CRITICAL();
+        robot.manual_pwm_enabled = false;
+        bool float_enabled = robot.float_enabled;
+        if (!float_enabled) {
+            set_all_pwm_neutral(InitPWM_);
+        }
+        taskEXIT_CRITICAL();
+
+        if (!float_enabled) {
+            return;
+        }
+    }
+
     if (robot.float_enabled) {
         vertical_allocation();
         horizontal_allocation();
     } else {
-        for (int i = 0; i < 8; i++)
-            robot.pwm[i] = InitPWM_;
+        taskENTER_CRITICAL();
+        set_all_pwm_neutral(InitPWM_);
+        taskEXIT_CRITICAL();
     }
 }

@@ -2,6 +2,8 @@
 
 #include "include/MS5837.h"
 #include "DataBus.hpp"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /* CubeMX-generated I2C handle. Replace the symbol if you wired the sensor
  * to a different I2C peripheral (e.g. hi2c2 / hi2c3). The MS5837 itself
@@ -52,10 +54,14 @@ public:
         if (now - last_read_ >= static_cast<uint32_t>(period_)) {
             sensor_.read();
             last_read_ = now;
-            // Publish to DataBus
-            robot.depth_m       = sensor_.depth();
-            robot.pressure_mbar = sensor_.pressure();
-            robot.water_temp_c  = sensor_.temperature();
+            float depth_m = sensor_.depth();
+            float pressure_mbar = sensor_.pressure();
+            float water_temp_c = sensor_.temperature();
+            taskENTER_CRITICAL();
+            robot.depth_m       = depth_m;
+            robot.pressure_mbar = pressure_mbar;
+            robot.water_temp_c  = water_temp_c;
+            taskEXIT_CRITICAL();
         }
     }
 
