@@ -10,6 +10,7 @@
 
 #include "MS5837.h"
 #include "i2c.h"
+#include "tca9548a.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -17,6 +18,7 @@
 /* MS5837 register / command set (datasheet). */
 static const uint8_t MS5837_ADDR_7BIT       = 0x76;
 static const uint8_t MS5837_HAL_ADDR        = (MS5837_ADDR_7BIT << 1); /* HAL uses 8-bit addresses. */
+static const uint8_t MS5837_TCA_CHANNEL     = 0;
 static const uint8_t MS5837_RESET           = 0x1E;
 static const uint8_t MS5837_ADC_READ        = 0x00;
 static const uint8_t MS5837_PROM_READ       = 0xA0;
@@ -54,7 +56,13 @@ namespace {
 
 bool lock_bus_if_needed(I2C_HandleTypeDef *h) {
     if (h == &hi2c2) {
-        return I2C2_BusLock(MS5837_HAL_TIMEOUT_MS);
+        if (!I2C2_BusLock(MS5837_HAL_TIMEOUT_MS)) {
+            return false;
+        }
+        if (TCA9548A_SelectChannel(h, MS5837_TCA_CHANNEL) != HAL_OK) {
+            I2C2_BusUnlock();
+            return false;
+        }
     }
     return true;
 }

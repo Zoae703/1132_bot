@@ -7,7 +7,6 @@ extern "C" {
 void SensorTaskFunc(void *argument);
 void ControlTaskFunc(void *argument);
 void CommTaskFunc(void *argument);
-void DepthTaskFunc(void *argument);
 
 #ifdef __cplusplus
 }

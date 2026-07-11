@@ -13,6 +13,7 @@
 #include "PCA9685Driver.hpp"
 #include "MotorControl.hpp"
 #include "Communication.hpp"
+#include "Protocol.hpp"
 
 static BMI088Sensor     imu(5, "3G", "2000");
 static MS5837Sensor     depth_sensor(997, 100);

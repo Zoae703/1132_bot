@@ -53,29 +53,22 @@
 osThreadId_t sensorTaskHandle;
 const osThreadAttr_t sensorTask_attributes = {
   .name = "sensorTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for controlTask */
 osThreadId_t controlTaskHandle;
 const osThreadAttr_t controlTask_attributes = {
   .name = "controlTask",
   .stack_size = 1024 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for commTask */
 osThreadId_t commTaskHandle;
 const osThreadAttr_t commTask_attributes = {
   .name = "commTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-/* Definitions for depthTask */
-osThreadId_t depthTaskHandle;
-const osThreadAttr_t depthTask_attributes = {
-  .name = "depthTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityHigh,
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -130,13 +123,6 @@ void MX_FREERTOS_Init(void) {
   /* creation of commTask */
   commTaskHandle = osThreadNew(CommTaskFunc, NULL, &commTask_attributes);
   if (commTaskHandle == NULL)
-  {
-    Error_Handler();
-  }
-
-  /* creation of depthTask */
-  depthTaskHandle = osThreadNew(DepthTaskFunc, NULL, &depthTask_attributes);
-  if (depthTaskHandle == NULL)
   {
     Error_Handler();
   }

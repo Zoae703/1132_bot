@@ -1,0 +1,5 @@
+name: Protocol
+include: Protocol.hpp
+description: Binary protocol parser and command handler (ProtoMsg v2).
+dependencies:
+  - DataBus

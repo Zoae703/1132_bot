@@ -44,6 +44,11 @@ bool I2C2_BusLock(uint32_t timeout_ms)
 {
   if (i2c2_bus_mutex == NULL)
   {
+    if (osKernelGetState() != osKernelRunning)
+    {
+      return true;
+    }
+
     Error_Handler();
     return false;
   }
@@ -52,6 +57,11 @@ bool I2C2_BusLock(uint32_t timeout_ms)
 
 void I2C2_BusUnlock(void)
 {
+  if (osKernelGetState() != osKernelRunning)
+  {
+    return;
+  }
+
   if (i2c2_bus_mutex != NULL)
   {
     (void)osMutexRelease(i2c2_bus_mutex);

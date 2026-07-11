@@ -14,6 +14,24 @@
       "command": "cmake --build build/Debug -j$(nproc)",
       "group": "build",
       "problemMatcher": []
+    },
+    {
+      "label": "STM32: flash DAPLink",
+      "type": "shell",
+      "command": "${config:cortex-debug.openocdPath}",
+      "args": [
+        "-f",
+        "${workspaceFolder}/openocd.cfg",
+        "-c",
+        "program ${workspaceFolder}/build/Debug/1132_bot.elf verify reset exit"
+      ],
+      "dependsOn": "STM32: build",
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
     }
   ]
 }

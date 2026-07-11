@@ -4,6 +4,6 @@
 
 class Communication {
 public:
-    void Init()   { Comm_Init(); }
-    void Update() { Comm_Process(); }
+    bool Init() { return Comm_Init(); }
+    void Update() { /* Binary parsing is owned by CommunicationTask. */ }
 };

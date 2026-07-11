@@ -51,6 +51,10 @@ modules:
     type: MotorControl
     include: MotorControl.hpp
 
+  - id: protocol
+    type: Protocol
+    include: Protocol.hpp
+
   - id: communication
     type: Communication
     include: Communication.hpp

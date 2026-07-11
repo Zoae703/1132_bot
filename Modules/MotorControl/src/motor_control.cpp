@@ -16,6 +16,12 @@ static float normalize_angle(float angle) {
     return angle - MC_PI;
 }
 
+static int32_t clamp_motor_pwm(int32_t pwm) {
+    if (pwm < ROBOT_PWM_MIN_US) return ROBOT_PWM_MIN_US;
+    if (pwm > ROBOT_PWM_MAX_US) return ROBOT_PWM_MAX_US;
+    return pwm;
+}
+
 static void set_all_pwm_neutral(int32_t neutral) {
     for (int i = 0; i < 8; i++)
         robot.pwm[i] = neutral;
@@ -38,7 +44,7 @@ void MotorControl::Init() {
     for (int i = 0; i < 8; i++) { Sign_[i] = sign[i]; Compensation_[i] = 50; }
     for (int i = 0; i < 4; i++) { InID_[i] = inid[i]; OutID_[i] = outid[i]; }
 
-    InitPWM_ = 1610;
+    InitPWM_ = ROBOT_PWM_NEUTRAL_US;
 
     // Vertical neutral PWM with small trim (verbatim from reference)
     FloatPWM_[0] = InitPWM_;
@@ -118,7 +124,7 @@ void MotorControl::vertical_allocation() {
 
         if (pwm > InitPWM_)      pwm += comp;
         else if (pwm < InitPWM_) pwm -= comp;
-        robot.pwm[idx] = pwm;
+        robot.pwm[idx] = clamp_motor_pwm(pwm);
     }
 }
 
@@ -145,23 +151,127 @@ void MotorControl::horizontal_allocation() {
 
         if (pwm > InitPWM_)      pwm += comp;
         else if (pwm < InitPWM_) pwm -= comp;
-        robot.pwm[idx] = pwm;
+        robot.pwm[idx] = clamp_motor_pwm(pwm);
+    }
+}
+
+void MotorControl::apply_pwm_limits() {
+    for (int i = 0; i < 8; i++) {
+        robot.pwm[i] = clamp_motor_pwm(robot.pwm[i]);
+    }
+}
+
+void MotorControl::set_output_neutral() {
+    set_all_pwm_neutral(InitPWM_);
+}
+
+void MotorControl::copy_manual_pwm() {
+    for (int i = 0; i < 8; i++) {
+        robot.pwm[i] = clamp_motor_pwm(robot.manual_pwm[i]);
     }
 }
 
 void MotorControl::Update() {
     robot.loop_count++;
 
+    /* === State-machine-gated PWM output === */
+
+    RobotState state;
+    bool estop_locked;
+    taskENTER_CRITICAL();
+    state = robot.state;
+    estop_locked = robot.estop_locked;
+    taskEXIT_CRITICAL();
+
+    /* Hard stop: ESTOP locked or unsafe states → force neutral */
+    if (estop_locked ||
+        state == RobotState::DISARMED ||
+        state == RobotState::COMM_LOST ||
+        state == RobotState::EMERGENCY_STOP ||
+        state == RobotState::FAULT)
+    {
+        taskENTER_CRITICAL();
+        robot.manual_pwm_enabled = false;
+        robot.float_enabled = false;
+        robot.angle_enabled = false;
+        robot.motion_state = ST_STOP;
+        robot.active_test_channel = 0xFF;
+        set_output_neutral();
+        taskEXIT_CRITICAL();
+        return;
+    }
+
+    /* ARMED_IDLE: no PID output, all neutral */
+    if (state == RobotState::ARMED_IDLE)
+    {
+        taskENTER_CRITICAL();
+        robot.manual_pwm_enabled = false;
+        set_output_neutral();
+        taskEXIT_CRITICAL();
+        return;
+    }
+
+    /* MANUAL_TEST: single-channel PWM only */
+    if (state == RobotState::MANUAL_TEST)
+    {
+        bool manual_enabled;
+        uint8_t active_ch;
+        taskENTER_CRITICAL();
+        manual_enabled = robot.manual_pwm_enabled;
+        active_ch = robot.active_test_channel;
+        taskEXIT_CRITICAL();
+
+        if (manual_enabled && active_ch < 8U)
+        {
+            /* Only copy the active channel; all others stay neutral */
+            taskENTER_CRITICAL();
+            int32_t val = robot.manual_pwm[active_ch];
+            taskEXIT_CRITICAL();
+            val = clamp_motor_pwm(val);
+
+            taskENTER_CRITICAL();
+            for (int i = 0; i < 8; i++)
+                robot.pwm[i] = InitPWM_;
+            robot.pwm[active_ch] = val;
+            taskEXIT_CRITICAL();
+        }
+        else
+        {
+            taskENTER_CRITICAL();
+            set_output_neutral();
+            taskEXIT_CRITICAL();
+        }
+        return;
+    }
+
+    /* === ARMED_ACTIVE: legacy PID cascade === */
+
+    bool control_enable;
     bool manual_pwm_enabled;
     uint32_t manual_pwm_last_ms;
     taskENTER_CRITICAL();
+    control_enable = robot.control_enable;
     manual_pwm_enabled = robot.manual_pwm_enabled;
     manual_pwm_last_ms = robot.manual_pwm_last_ms;
     taskEXIT_CRITICAL();
 
+    if (!control_enable) {
+        taskENTER_CRITICAL();
+        robot.manual_pwm_enabled = false;
+        robot.float_enabled = false;
+        robot.angle_enabled = false;
+        robot.motion_state = ST_STOP;
+        set_output_neutral();
+        taskEXIT_CRITICAL();
+        return;
+    }
+
     if (manual_pwm_enabled) {
         uint32_t elapsed_ms = HAL_GetTick() - manual_pwm_last_ms;
         if (elapsed_ms <= ROBOT_MANUAL_PWM_TIMEOUT_MS) {
+            taskENTER_CRITICAL();
+            copy_manual_pwm();
+            taskEXIT_CRITICAL();
             return;
         }
 
@@ -169,7 +279,7 @@ void MotorControl::Update() {
         robot.manual_pwm_enabled = false;
         bool float_enabled = robot.float_enabled;
         if (!float_enabled) {
-            set_all_pwm_neutral(InitPWM_);
+            set_output_neutral();
         }
         taskEXIT_CRITICAL();
 
@@ -181,9 +291,12 @@ void MotorControl::Update() {
     if (robot.float_enabled) {
         vertical_allocation();
         horizontal_allocation();
+        taskENTER_CRITICAL();
+        apply_pwm_limits();
+        taskEXIT_CRITICAL();
     } else {
         taskENTER_CRITICAL();
-        set_all_pwm_neutral(InitPWM_);
+        set_output_neutral();
         taskEXIT_CRITICAL();
     }
 }

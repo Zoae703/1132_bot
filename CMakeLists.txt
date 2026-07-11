@@ -50,6 +50,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     ${CMAKE_SOURCE_DIR}/Core/Src/robot_tasks.cpp
+    ${CMAKE_SOURCE_DIR}/Core/Src/tca9548a.c
 )
 
 # Add include paths
@@ -93,21 +94,49 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
 )
 
-# DAP-Link 烧录目标，调用脚本自动在 C 盘和常见目录里搜索 openocd.exe
-set(FLASH_TOOL_SCRIPT ${CMAKE_SOURCE_DIR}/tools/flash-daplink.ps1)
-set(FLASH_INTERFACE_CFG interface/cmsis-dap.cfg CACHE STRING "OpenOCD 接口配置")
-set(FLASH_TARGET_CFG target/stm32f4x.cfg CACHE STRING "OpenOCD 目标配置")
+# DAP-Link 烧录目标
+set(FLASH_OPENOCD_CFG ${CMAKE_SOURCE_DIR}/openocd.cfg CACHE FILEPATH "OpenOCD DAPLink 配置文件")
 
-add_custom_target(flash
-    DEPENDS ${CMAKE_PROJECT_NAME}
-    COMMAND powershell.exe
-            -NoProfile
-            -ExecutionPolicy Bypass
-            -File ${FLASH_TOOL_SCRIPT}
-            -ElfFile $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
-            -InterfaceCfg ${FLASH_INTERFACE_CFG}
-            -TargetCfg ${FLASH_TARGET_CFG}
-    COMMENT "使用 DAP-Link 烧录 ${CMAKE_PROJECT_NAME}"
-    USES_TERMINAL
-    VERBATIM
-)
+if(WIN32)
+    set(FLASH_TOOL_SCRIPT ${CMAKE_SOURCE_DIR}/tools/flash-daplink.ps1)
+    set(FLASH_INTERFACE_CFG interface/cmsis-dap.cfg CACHE STRING "OpenOCD 接口配置")
+    set(FLASH_TARGET_CFG target/stm32f4x.cfg CACHE STRING "OpenOCD 目标配置")
+
+    add_custom_target(flash
+        DEPENDS ${CMAKE_PROJECT_NAME}
+        COMMAND powershell.exe
+                -NoProfile
+                -ExecutionPolicy Bypass
+                -File ${FLASH_TOOL_SCRIPT}
+                -ElfFile $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+                -InterfaceCfg ${FLASH_INTERFACE_CFG}
+                -TargetCfg ${FLASH_TARGET_CFG}
+        COMMENT "使用 DAP-Link 烧录 ${CMAKE_PROJECT_NAME}"
+        USES_TERMINAL
+        VERBATIM
+    )
+else()
+    set(FLASH_OPENOCD_DEFAULT "$ENV{HOME}/.local/xpack-openocd/bin/openocd")
+    if(EXISTS "${FLASH_OPENOCD_DEFAULT}")
+        set(FLASH_OPENOCD_INIT "${FLASH_OPENOCD_DEFAULT}")
+    else()
+        find_program(FLASH_OPENOCD_INIT
+            NAMES openocd
+            DOC "OpenOCD 可执行文件"
+        )
+        if(NOT FLASH_OPENOCD_INIT)
+            set(FLASH_OPENOCD_INIT openocd)
+        endif()
+    endif()
+    set(FLASH_OPENOCD ${FLASH_OPENOCD_INIT} CACHE FILEPATH "OpenOCD 可执行文件")
+
+    add_custom_target(flash
+        DEPENDS ${CMAKE_PROJECT_NAME}
+        COMMAND ${FLASH_OPENOCD}
+                -f ${FLASH_OPENOCD_CFG}
+                -c "program $<TARGET_FILE:${CMAKE_PROJECT_NAME}> verify reset exit"
+        COMMENT "使用 DAP-Link 烧录 ${CMAKE_PROJECT_NAME}"
+        USES_TERMINAL
+        VERBATIM
+    )
+endif()
