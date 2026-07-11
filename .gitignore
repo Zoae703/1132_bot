@@ -1,5 +1,14 @@
 # Build output
 build/
+web_frontend/dist/
+web_frontend/node_modules/
+
+# Python environments, caches and runtime output
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+logs/
 
 # CubeMX
 mx.scratch

@@ -1,0 +1,70 @@
+# 1132_bot — Orange Pi Console Configuration
+
+protocol_version: 2
+
+serial:
+  port: /dev/ttyS5
+  baudrate: 115200
+
+heartbeat:
+  interval_ms: 200
+  timeout_ms: 1000
+
+reconnect:
+  min_delay_s: 1
+  max_delay_s: 30
+  max_retries: 0  # 0 = infinite
+
+pwm:
+  channel_count: 8
+  neutral_us: 1500
+  min_test_us: 1450
+  max_test_us: 1550
+  min_absolute_us: 1300
+  max_absolute_us: 1700
+  min_test_duration_ms: 200
+  max_test_duration_ms: 2000
+  default_timeout_ms: 500
+
+telemetry:
+  status_hz: 5
+  sensors_hz: 5
+  status_stale_timeout_s: 1.0
+  sensors_stale_timeout_s: 1.0
+  stm32_online_timeout_s: 2.0
+  request_timeout_s: 1.0
+  # STM32 controlTask runs every 20ms; command confirmation polls on that cadence.
+  command_confirmation_timeout_s: 0.5
+  command_confirmation_poll_interval_s: 0.02
+
+web:
+  host: "0.0.0.0"
+  port: 8000
+  static_dir: web_frontend/dist
+  websocket_send_timeout_s: 1.0
+  # The Vite development server proxies /api and /ws, so no CORS origin is
+  # needed by default. Add explicit origins only for a separate frontend host.
+  cors_origins: []
+
+logging:
+  level: INFO
+  file: logs/opi_console.log
+  event_file: logs/events.log
+  max_bytes: 10485760  # 10 MB
+  backup_count: 5
+
+simulation:
+  enabled: false
+
+features:
+  manual_pwm: true
+  motor_mapping: true
+  sensor_stream: true
+  emergency_stop: true
+
+motor_mapping:
+  file: config/motor_mapping.json
+
+safety:
+  disconnect_command_timeout_s: 1.5
+  process_lock_file: /tmp/1132_bot_console.lock

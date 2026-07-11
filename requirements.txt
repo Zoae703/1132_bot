@@ -1,0 +1,8 @@
+# 1132_bot Orange Pi dependencies
+fastapi>=0.115.0
+pydantic>=2.9,<3
+uvicorn[standard]>=0.32.0
+pyserial>=3.5
+pyserial-asyncio>=0.6
+pyyaml>=6.0
+websockets>=13.0
