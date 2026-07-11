@@ -201,7 +201,7 @@ STM32 Debug 构建通过；但缺少 `typecheck`/`lint` 脚本，协议主机测
 - TypeScript、ESLint、生产构建：通过；Vite 7.3.6，产物 JS 约 172kB。
 - `npm audit --audit-level=high`：0 vulnerabilities。
 - Chrome 模拟 E2E：通过；覆盖断线重连、API 错误、同步双击、ESTOP 优先、最后客户端关闭后 DISARM/8 路 1500us。
-- STM32 两组主机协议测试：PASS；Debug 固件构建通过，FLASH 117596B、RAM 50120B。
+- STM32 两组主机协议测试：PASS；Debug 固件构建通过，FLASH 117592B、RAM 50120B。
 - 重复启动：第二实例在串口前明确报告已有 PID；Ctrl+C 日志确认 shutdown neutral=True、disarm=True。
 
 ## 修改文件
