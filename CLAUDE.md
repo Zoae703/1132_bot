@@ -1,5 +1,29 @@
 # CLAUDE.md — 1132_bot 8-Motor Control System
 
+## Project Structure
+
+```
+1132_bot/                  # Monorepo root
+├── firmware/              # STM32F407 embedded firmware
+│   ├── Core/              # HAL user code (main, tasks, interrupts)
+│   ├── Drivers/           # HAL drivers (BMI088, MS5837, etc.)
+│   ├── Modules/           # xy_robotkit modules (DataBus, PID, AHRS, MotorControl...)
+│   ├── protocol/          # Binary protocol (C headers/sources)
+│   ├── tests/             # C++ host tests
+│   ├── CMakeLists.txt     # Build entry point
+│   └── xy_robot.yaml      # Module registry
+├── web/                   # Orange Pi web console (上位机)
+│   ├── opi_console/       # Serial proxy + web server entry point
+│   ├── web_backend/       # FastAPI + WebSocket API
+│   ├── web_frontend/      # React/Vite frontend
+│   ├── protocol/          # Binary protocol (Python)
+│   ├── tests/             # Python tests
+│   └── scripts/           # start_web_console.sh
+├── scripts/               # CI scripts (run_tests.sh)
+├── docs/                  # Architecture, validation, usage docs
+└── CLAUDE.md              # This file
+```
+
 ## Project Context
 
 This is an STM32F407 (RoboMaster C-Board) firmware project for an underwater ROV. Currently:

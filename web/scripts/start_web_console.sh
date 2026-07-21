@@ -132,7 +132,7 @@ if [ -f "requirements.txt" ]; then
 fi
 
 # ---- Launch ----
-export PYTHONPATH="${PYTHONPATH}:$(pwd):$(pwd)/protocol/shared"
+export PYTHONPATH="$(pwd):$(pwd)/protocol/shared${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "Starting console..."
 python3 -m opi_console.main \
