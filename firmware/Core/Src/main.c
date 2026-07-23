@@ -56,7 +56,7 @@
    If PCA9685 prescale is later tuned to a 20 ms period, change this to 20000. */
 #define PCA9685_ACTUAL_PERIOD_US 19450U
 #define PWM_NEUTRAL_US 1500U
-#define PWM_MAX_OFFSET_US 150
+#define PWM_MAX_OFFSET_US 500
 #define PWM_TEST_DURATION_MS 300U
 #define PWM_MIN_SAFE_US (PWM_NEUTRAL_US - PWM_MAX_OFFSET_US)
 #define PWM_MAX_SAFE_US (PWM_NEUTRAL_US + PWM_MAX_OFFSET_US)
@@ -246,7 +246,16 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 7;
-  g_clock_hal_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+
+  /* HSE crystal may need >100ms on cold boot after flash.
+     Retry up to 5 times (500ms total) before giving up. */
+  g_clock_hal_status = HAL_ERROR;
+  for (int retry = 0; retry < 5; retry++)
+  {
+    g_clock_hal_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+    if (g_clock_hal_status == HAL_OK) break;
+  }
+
   if (g_clock_hal_status != HAL_OK)
   {
     g_clock_error_step = 1;

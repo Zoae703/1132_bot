@@ -94,7 +94,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
 )
 
-# DAP-Link 烧录目标
+# DAP-Link 烧录/调试目标
 set(FLASH_OPENOCD_CFG ${CMAKE_SOURCE_DIR}/openocd.cfg CACHE FILEPATH "OpenOCD DAPLink 配置文件")
 
 if(WIN32)
@@ -136,6 +136,17 @@ else()
                 -f ${FLASH_OPENOCD_CFG}
                 -c "program $<TARGET_FILE:${CMAKE_PROJECT_NAME}> verify reset exit"
         COMMENT "使用 DAP-Link 烧录 ${CMAKE_PROJECT_NAME}"
+        USES_TERMINAL
+        VERBATIM
+    )
+
+    # OpenOCD GDB Server 调试目标
+    # 用法: cmake --build build/Debug --target debug-server
+    # 然后在另一个终端: gdb-multiarch build/Debug/1132_bot.elf -ex "target extended-remote :3333"
+    add_custom_target(debug-server
+        COMMAND ${FLASH_OPENOCD}
+                -f ${FLASH_OPENOCD_CFG}
+        COMMENT "启动 OpenOCD GDB Server (端口 3333)，在另一个终端用 gdb-multiarch 连接"
         USES_TERMINAL
         VERBATIM
     )

@@ -2,10 +2,10 @@
 #include <cstdint>
 
 inline constexpr int32_t ROBOT_PWM_NEUTRAL_US = 1500;
-inline constexpr int32_t ROBOT_PWM_MIN_US = 1300;
-inline constexpr int32_t ROBOT_PWM_MAX_US = 1700;
-inline constexpr int32_t ROBOT_PWM_TEST_MIN_US = 1450;
-inline constexpr int32_t ROBOT_PWM_TEST_MAX_US = 1550;
+inline constexpr int32_t ROBOT_PWM_MIN_US = 1000;
+inline constexpr int32_t ROBOT_PWM_MAX_US = 2000;
+inline constexpr int32_t ROBOT_PWM_TEST_MIN_US = 1000;
+inline constexpr int32_t ROBOT_PWM_TEST_MAX_US = 2000;
 inline constexpr uint32_t ROBOT_COMMAND_TIMEOUT_MS = 500U;
 inline constexpr uint32_t ROBOT_MANUAL_PWM_TIMEOUT_MS = 500U;
 inline constexpr uint32_t ROBOT_HEARTBEAT_TIMEOUT_MS = 1000U;
