@@ -19,12 +19,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "protocol", "sh
 
 from protocol import (
     MsgType, SafetyState, NeutralReason,
-    SetPwm, StatusReport, SensorReport,
+    SetPwm, SetBodyCommand, MotionTuning, StatusReport, SensorReport,
     HeartbeatAck, SafetyEvent,
 )
 
 from opi_console.serial_transport import SerialTransport
 from opi_console.config import AppConfig, coerce_config
+from opi_console.motion_tuning import (
+    MotionTuningStore,
+    clone_motion_tuning,
+    motion_tuning_equal,
+    validate_motion_tuning,
+)
 
 logger = logging.getLogger("opi_console.proxy")
 
@@ -71,6 +77,9 @@ class CachedState:
     stm32_online: bool = False
     status_stale: bool = True
     sensors_stale: bool = True
+    motion_tuning_synced: bool = False
+    motion_tuning_sync_state: str = "pending"
+    motion_tuning_sync_error: Optional[str] = None
 
     @property
     def confirmed_pwm(self) -> List[int]:
@@ -141,6 +150,12 @@ class CachedState:
             "angle_enabled": bool(self.flags & 0x04),
             "manual_pwm_enabled": bool(self.flags & 0x08),
             "estop_locked": bool(self.flags & 0x10),
+            "body_control_enabled": bool(self.flags & 0x20),
+            "horizontal_saturated": bool(self.flags & 0x40),
+            "vertical_saturated": bool(self.flags & 0x80),
+            "motion_tuning_synced": self.motion_tuning_synced,
+            "motion_tuning_sync_state": self.motion_tuning_sync_state,
+            "motion_tuning_sync_error": self.motion_tuning_sync_error,
             "pwm": list(self.pwm),
             "confirmed_pwm": list(self.pwm),
             "requested_pwm": list(self.requested_pwm),
@@ -224,8 +239,11 @@ class Stm32Proxy:
         self._command_confirmation_poll_interval_s = (
             telemetry_cfg.command_confirmation_poll_interval_s)
         self._sensor_poll_task: Optional[asyncio.Task] = None
+        self._motion_tuning_sync_task: Optional[asyncio.Task] = None
         self._status_request_lock = asyncio.Lock()
         self._sensor_request_lock = asyncio.Lock()
+        self._motion_tuning_request_lock = asyncio.Lock()
+        self._motion_tuning_apply_lock = asyncio.Lock()
         self._sensor_request_in_flight = False
         self.sensor_poll_requests = 0
         self.sensor_poll_failures = 0
@@ -234,6 +252,12 @@ class Stm32Proxy:
         self._last_stm32_uptime_s: Optional[int] = None
         self._connection_generation = transport.connection_generation
         self._neutral_reason_override: Optional[NeutralReason] = None
+        self._motion_tuning_store = MotionTuningStore(
+            self.config.resolve_path(self.config.motion_tuning.file))
+        self._desired_motion_tuning = self._motion_tuning_store.load()
+        self._confirmed_motion_tuning: Optional[MotionTuning] = None
+        self._motion_tuning_sync_interval_s = (
+            self.config.motion_tuning.sync_interval_s)
         self.last_command_sequence: Optional[int] = None
         self._event_callbacks: Dict[str, List[Callable]] = {
             "status": [],
@@ -308,6 +332,10 @@ class Stm32Proxy:
         self._state.request_state = "idle"
         self._state.last_command_error = None
         self._state.active_channel = 0xFF
+        self._state.motion_tuning_synced = False
+        self._state.motion_tuning_sync_state = "pending"
+        self._state.motion_tuning_sync_error = None
+        self._confirmed_motion_tuning = None
         self._last_stm32_uptime_s = None
         self._neutral_reason_override = None
 
@@ -319,13 +347,43 @@ class Stm32Proxy:
         self.refresh_link_state()
         return self._state.sensors_to_dict()
 
+    def motion_tuning_snapshot(self) -> dict:
+        self.refresh_link_state()
+        return {
+            "desired": self._desired_motion_tuning.to_dict(),
+            "confirmed": (
+                self._confirmed_motion_tuning.to_dict()
+                if self._confirmed_motion_tuning is not None
+                else None
+            ),
+            "synced": self._state.motion_tuning_synced,
+            "sync_state": self._state.motion_tuning_sync_state,
+            "sync_error": self._state.motion_tuning_sync_error,
+            "persist_path": str(self._motion_tuning_store.path),
+        }
+
     async def start_background_tasks(self):
-        """Start the single process-wide sensor polling loop."""
-        if self._sensor_poll_hz <= 0:
-            return
-        if self._sensor_poll_task is None or self._sensor_poll_task.done():
+        """Start process-wide telemetry and tuning synchronization loops."""
+        if (
+            self._sensor_poll_hz > 0
+            and (
+                self._sensor_poll_task is None
+                or self._sensor_poll_task.done()
+            )
+        ):
             self._sensor_poll_task = asyncio.create_task(
                 self._sensor_poll_loop(), name="stm32-sensor-poll")
+        if (
+            self.config.features.motion_tuning
+            and (
+                self._motion_tuning_sync_task is None
+                or self._motion_tuning_sync_task.done()
+            )
+        ):
+            self._motion_tuning_sync_task = asyncio.create_task(
+                self._motion_tuning_sync_loop(),
+                name="stm32-motion-tuning-sync",
+            )
 
     @property
     def sensor_poll_task_running(self) -> bool:
@@ -334,12 +392,27 @@ class Stm32Proxy:
             and not self._sensor_poll_task.done()
         )
 
+    @property
+    def motion_tuning_sync_task_running(self) -> bool:
+        return bool(
+            self._motion_tuning_sync_task is not None
+            and not self._motion_tuning_sync_task.done()
+        )
+
     async def stop_background_tasks(self):
-        task = self._sensor_poll_task
+        tasks = [
+            task for task in (
+                self._sensor_poll_task,
+                self._motion_tuning_sync_task,
+            )
+            if task is not None and not task.done()
+        ]
         self._sensor_poll_task = None
-        if task and not task.done():
+        self._motion_tuning_sync_task = None
+        for task in tasks:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _sensor_poll_loop(self):
         interval = 1.0 / self._sensor_poll_hz
@@ -365,6 +438,31 @@ class Stm32Proxy:
                 logger.exception(
                     "Sensor polling task recovered from an unexpected error")
                 await asyncio.sleep(interval)
+
+    async def _motion_tuning_sync_loop(self):
+        while True:
+            try:
+                state = self.refresh_link_state()
+                if (
+                    self._transport.connected
+                    and state.stm32_online
+                    and not state.motion_tuning_synced
+                    and state.safety_state in (
+                        SafetyState.DISARMED,
+                        SafetyState.ARMED_IDLE,
+                    )
+                ):
+                    await self.synchronize_motion_tuning()
+                await asyncio.sleep(self._motion_tuning_sync_interval_s)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._state.motion_tuning_synced = False
+                self._state.motion_tuning_sync_state = "error"
+                self._state.motion_tuning_sync_error = str(exc)
+                logger.exception(
+                    "Motion tuning synchronization recovered from an error")
+                await asyncio.sleep(self._motion_tuning_sync_interval_s)
 
     # -------- Event callbacks --------
 
@@ -621,6 +719,178 @@ class Stm32Proxy:
             self._fail_pwm_request()
         return ok
 
+    def _set_motion_tuning_error(self, message: str):
+        self._state.motion_tuning_synced = False
+        self._state.motion_tuning_sync_state = "error"
+        self._state.motion_tuning_sync_error = message
+
+    def _confirm_motion_tuning(self, tuning: MotionTuning):
+        self._confirmed_motion_tuning = clone_motion_tuning(tuning)
+        synced = motion_tuning_equal(
+            self._desired_motion_tuning,
+            self._confirmed_motion_tuning,
+        )
+        self._state.motion_tuning_synced = synced
+        self._state.motion_tuning_sync_state = (
+            "synced" if synced else "mismatch")
+        self._state.motion_tuning_sync_error = (
+            None if synced else "STM32 tuning differs from persisted tuning")
+
+    async def _synchronize_motion_tuning_locked(self) -> bool:
+        state = self.refresh_link_state()
+        if not self._transport.connected or not state.stm32_online:
+            self._set_motion_tuning_error("STM32 is offline")
+            return False
+        if state.status_stale:
+            report = await self.request_status()
+            if report is None:
+                self._set_motion_tuning_error(
+                    "status confirmation timed out before tuning sync")
+                return False
+            state = self.refresh_link_state()
+        if state.safety_state not in (
+            SafetyState.DISARMED,
+            SafetyState.ARMED_IDLE,
+        ):
+            self._state.motion_tuning_synced = False
+            self._state.motion_tuning_sync_state = "waiting_for_stop"
+            self._state.motion_tuning_sync_error = (
+                "Stop motion before applying tuning")
+            return False
+
+        self._state.motion_tuning_sync_state = "checking"
+        self._state.motion_tuning_sync_error = None
+        current = await self.request_motion_tuning()
+        if motion_tuning_equal(current, self._desired_motion_tuning):
+            self._confirm_motion_tuning(current)
+            return True
+
+        self._state.motion_tuning_sync_state = "applying"
+        result = await self._transport.send_frame(
+            MsgType.SET_MOTION_TUNING,
+            self._desired_motion_tuning.pack(),
+            expect_ack=True,
+        )
+        self.last_command_sequence = (
+            result if result is not None
+            else self._transport.last_command_sequence_attempted
+        )
+        if result is None:
+            self._set_motion_tuning_error(
+                self._transport.last_error or "motion tuning ACK timeout")
+            return False
+
+        confirmed = await self.request_motion_tuning()
+        if confirmed is None:
+            self._set_motion_tuning_error(
+                "motion tuning report confirmation timeout")
+            return False
+        self._confirm_motion_tuning(confirmed)
+        return self._state.motion_tuning_synced
+
+    async def synchronize_motion_tuning(self) -> bool:
+        if not self.config.features.motion_tuning:
+            self._set_motion_tuning_error("Motion tuning feature is disabled")
+            return False
+        async with self._motion_tuning_apply_lock:
+            return await self._synchronize_motion_tuning_locked()
+
+    async def ensure_motion_tuning_synced(self) -> bool:
+        # Re-read the STM32 before every transition into active body control.
+        # A board reset can restore firmware defaults without dropping UART.
+        return await self.synchronize_motion_tuning()
+
+    async def set_motion_tuning(
+        self,
+        tuning: MotionTuning,
+        persist: bool = True,
+    ) -> bool:
+        desired = validate_motion_tuning(clone_motion_tuning(tuning))
+        async with self._motion_tuning_apply_lock:
+            state = self.refresh_link_state()
+            if state.safety_state not in (
+                SafetyState.DISARMED,
+                SafetyState.ARMED_IDLE,
+            ):
+                self._state.motion_tuning_sync_state = "waiting_for_stop"
+                self._state.motion_tuning_sync_error = (
+                    "Stop motion before applying tuning")
+                return False
+            if persist:
+                self._motion_tuning_store.save(desired)
+            self._desired_motion_tuning = desired
+            self._state.motion_tuning_synced = False
+            self._state.motion_tuning_sync_state = "pending"
+            self._state.motion_tuning_sync_error = None
+            return await self._synchronize_motion_tuning_locked()
+
+    async def enable_body_control(self) -> bool:
+        self._state.last_command_error = None
+        if not await self.ensure_motion_tuning_synced():
+            self._state.last_command_error = (
+                self._state.motion_tuning_sync_error
+                or "motion tuning is not synchronized")
+            return False
+        result = await self._transport.send_frame(
+            MsgType.BODY_CONTROL_ON, expect_ack=True)
+        if result is None:
+            self._state.last_command_error = (
+                self._transport.last_error or "BODY_CONTROL_ON failed")
+            return False
+        self.last_command_sequence = result
+        report = await self.request_status()
+        ok = bool(
+            report is not None
+            and report.safety_state == SafetyState.ARMED_ACTIVE
+            and report.body_control_enabled
+        )
+        if not ok:
+            self._state.last_command_error = (
+                "BODY_CONTROL_ON status confirmation timeout")
+        return ok
+
+    async def disable_body_control(self) -> bool:
+        self._begin_pwm_request([self._neutral_us] * self._channel_count)
+        result = await self._transport.send_frame(
+            MsgType.BODY_CONTROL_OFF, expect_ack=True)
+        if result is None:
+            self._fail_pwm_request()
+            return False
+        self.last_command_sequence = result
+        report = await self.request_status()
+        pwm_ok = self._confirm_pwm_from_report(report)
+        state_ok = self._confirm_safety_state(
+            report, (SafetyState.ARMED_IDLE,), "BODY_CONTROL_OFF")
+        return pwm_ok and state_ok
+
+    async def send_body_command(self, command: SetBodyCommand) -> bool:
+        values = command.values()
+        if any(
+            not math.isfinite(value) or value < -1.0 or value > 1.0
+            for value in values
+        ):
+            self._state.last_command_error = (
+                "body command axes must be finite and within -1.0..1.0")
+            return False
+        result = await self._transport.send_frame(
+            MsgType.SET_BODY_COMMAND,
+            command.pack(),
+            expect_ack=True,
+        )
+        self.last_command_sequence = (
+            result if result is not None
+            else self._transport.last_command_sequence_attempted
+        )
+        if result is None:
+            self._state.last_command_error = (
+                self._transport.last_error or "SET_BODY_COMMAND failed")
+            return False
+        self._state.last_command_error = None
+        return True
+
+    async def stop_body_motion(self) -> bool:
+        return await self.send_body_command(SetBodyCommand())
+
     async def force_neutral(self, reason: str, confirm: bool = True,
                             timeout: Optional[float] = None) -> bool:
         """Force all PWM outputs to neutral through the STM32 command path."""
@@ -713,6 +983,46 @@ class Stm32Proxy:
         finally:
             self._transport.remove_frame_callback(on_sensor)
 
+    async def request_motion_tuning(
+        self, timeout: Optional[float] = None
+    ) -> Optional[MotionTuning]:
+        async with self._motion_tuning_request_lock:
+            if not self._transport.connected:
+                return None
+            future = asyncio.get_running_loop().create_future()
+
+            async def on_tuning(msg_type, seq, payload):
+                if (
+                    msg_type == MsgType.MOTION_TUNING_REPORT
+                    and not future.done()
+                ):
+                    future.set_result(payload)
+
+            self._transport.on_frame(on_tuning)
+            await self._transport.send_frame(MsgType.REQUEST_MOTION_TUNING)
+            try:
+                payload = await asyncio.wait_for(
+                    future,
+                    timeout
+                    if timeout is not None
+                    else self._report_request_timeout_s,
+                )
+                tuning = MotionTuning.unpack(payload)
+                validate_motion_tuning(tuning)
+                return tuning
+            except (
+                asyncio.TimeoutError,
+                struct.error,
+                ValueError,
+                OverflowError,
+            ) as exc:
+                if not isinstance(exc, asyncio.TimeoutError):
+                    logger.warning(
+                        "Invalid MOTION_TUNING_REPORT payload: %s", exc)
+                return None
+            finally:
+                self._transport.remove_frame_callback(on_tuning)
+
     # -------- Frame handler --------
 
     async def _on_frame(self, msg_type: int, seq: int, payload: bytes):
@@ -780,6 +1090,21 @@ class Stm32Proxy:
                 self._state._last_sensor_report_mono = now_mono
                 emit_event = ("sensors", self._state)
 
+            elif msg_type == MsgType.MOTION_TUNING_REPORT:
+                try:
+                    tuning = MotionTuning.unpack(payload)
+                    validate_motion_tuning(tuning)
+                except (
+                    struct.error,
+                    ValueError,
+                    OverflowError,
+                ) as exc:
+                    self._transport.rx_errors += 1
+                    logger.warning(
+                        "Invalid MOTION_TUNING_REPORT payload: %s", exc)
+                    return
+                self._confirm_motion_tuning(tuning)
+
             elif msg_type == MsgType.HEARTBEAT_ACK:
                 try:
                     r = HeartbeatAck.unpack(payload)
@@ -802,6 +1127,10 @@ class Stm32Proxy:
                     self._state.request_state = "idle"
                     self._state.last_command_error = None
                     self._state.active_channel = 0xFF
+                    self._state.motion_tuning_synced = False
+                    self._state.motion_tuning_sync_state = "pending"
+                    self._state.motion_tuning_sync_error = None
+                    self._confirmed_motion_tuning = None
                     emit_event = ("connection", "stm32_restarted")
 
             elif msg_type == MsgType.SAFETY_EVENT:

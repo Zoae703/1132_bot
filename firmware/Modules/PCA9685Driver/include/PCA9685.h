@@ -10,3 +10,13 @@
 bool PCA9685_Init(I2C_HandleTypeDef* hi2c);
 bool PCA9685_SetPWM(uint8_t channel, uint32_t on, uint32_t off);
 bool PCA9685_SetAllPWM(const int32_t pwm_us[8]);
+
+using PCA9685_OutputGuard = bool (*)(const void *context,
+                                     uint32_t expected_generation);
+
+bool PCA9685_SetAllPWMGuarded(
+    const int32_t pwm_us[8],
+    PCA9685_OutputGuard output_guard,
+    const void *guard_context,
+    uint32_t expected_generation,
+    bool *superseded);

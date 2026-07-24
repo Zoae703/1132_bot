@@ -24,6 +24,9 @@ constexpr uint32_t kMaxPwmTimeoutMs = 2000U;
 constexpr float kMinDepthCm = 0.0F;
 constexpr float kMaxDepthCm = 30000.0F;
 constexpr float kMaxAbsYawDeg = 360.0F;
+constexpr float kLegacySurge = 80.0F / 450.0F;
+constexpr float kLegacySway = 80.0F / 450.0F;
+constexpr float kLegacyYaw = 40.0F / 450.0F;
 
 void increment_protocol_error()
 {
@@ -87,14 +90,36 @@ void log_state_change(bool changed, RobotState state)
 
 void neutral_locked(uint8_t reason)
 {
+    force_body_output_neutral(robot);
     for (uint8_t channel = 0U; channel < kChannelCount; ++channel)
     {
-        robot.pwm[channel] = ROBOT_PWM_NEUTRAL_US;
         robot.manual_pwm[channel] = ROBOT_PWM_NEUTRAL_US;
     }
     robot.manual_pwm_enabled = false;
     robot.active_test_channel = 0xFFU;
+    robot.body_control_enabled = false;
     robot.last_neutral_reason = reason;
+}
+
+void reject_body_command(uint16_t sequence, uint8_t type, uint8_t reason)
+{
+    const uint32_t now = HAL_GetTick();
+    bool changed = false;
+    RobotState resulting_state;
+    taskENTER_CRITICAL();
+    neutral_locked(robot.estop_locked ? ProtoNeutral_EMERGENCY_STOP
+                                      : ProtoNeutral_COMMAND);
+    robot.control_enable = false;
+    robot.float_enabled = false;
+    robot.angle_enabled = false;
+    if (!robot.estop_locked && robot.state == RobotState::ARMED_ACTIVE)
+    {
+        changed = set_state_locked(RobotState::ARMED_IDLE, now);
+    }
+    resulting_state = robot.state;
+    taskEXIT_CRITICAL();
+    log_state_change(changed, resulting_state);
+    reject(sequence, type, reason);
 }
 
 template <typename T>
@@ -122,7 +147,6 @@ void handle_arm(uint16_t sequence)
         robot.control_enable = false;
         robot.float_enabled = false;
         robot.angle_enabled = false;
-        robot.motion_state = 0U;
         neutral_locked(ProtoNeutral_NONE);
         changed = set_state_locked(RobotState::ARMED_IDLE, now);
     }
@@ -151,7 +175,6 @@ void handle_disarm(uint16_t sequence)
     robot.control_enable = false;
     robot.float_enabled = false;
     robot.angle_enabled = false;
-    robot.motion_state = 0U;
     if (robot.estop_locked)
     {
         neutral_locked(ProtoNeutral_EMERGENCY_STOP);
@@ -178,7 +201,6 @@ void handle_emergency_stop(uint16_t sequence)
     robot.control_enable = false;
     robot.float_enabled = false;
     robot.angle_enabled = false;
-    robot.motion_state = 0U;
     robot.estop_locked = true;
     neutral_locked(ProtoNeutral_EMERGENCY_STOP);
     changed = set_state_locked(RobotState::EMERGENCY_STOP, now);
@@ -224,7 +246,6 @@ void handle_enter_manual(uint16_t sequence)
         robot.control_enable = false;
         robot.float_enabled = false;
         robot.angle_enabled = false;
-        robot.motion_state = 0U;
         neutral_locked(ProtoNeutral_NONE);
         changed = set_state_locked(RobotState::MANUAL_TEST, now);
         valid = true;
@@ -337,7 +358,6 @@ void handle_set_all_neutral(uint16_t sequence)
     robot.control_enable = false;
     robot.float_enabled = false;
     robot.angle_enabled = false;
-    robot.motion_state = 0U;
     neutral_locked(robot.estop_locked ? ProtoNeutral_EMERGENCY_STOP
                                       : ProtoNeutral_COMMAND);
     resulting_state = robot.state;
@@ -369,7 +389,7 @@ void handle_float_on(uint16_t sequence)
         robot.control_enable = true;
         robot.manual_pwm_enabled = false;
         robot.active_test_channel = 0xFFU;
-        robot.motion_state = 0U;
+        force_body_output_neutral(robot);
         robot.last_cmd_tick = now;
         robot.last_neutral_reason = ProtoNeutral_NONE;
         changed = set_state_locked(RobotState::ARMED_ACTIVE, now);
@@ -395,8 +415,8 @@ void handle_float_off(uint16_t sequence)
     if (robot.state == RobotState::ARMED_ACTIVE)
     {
         robot.float_enabled = false;
-        robot.motion_state = 0U;
-        if (!robot.angle_enabled)
+        force_body_output_neutral(robot);
+        if (!robot.angle_enabled && !robot.body_control_enabled)
         {
             robot.control_enable = false;
             neutral_locked(ProtoNeutral_COMMAND);
@@ -456,7 +476,7 @@ void handle_angle_off(uint16_t sequence)
     if (robot.state == RobotState::ARMED_ACTIVE)
     {
         robot.angle_enabled = false;
-        if (!robot.float_enabled)
+        if (!robot.float_enabled && !robot.body_control_enabled)
         {
             robot.control_enable = false;
             neutral_locked(ProtoNeutral_COMMAND);
@@ -490,7 +510,8 @@ void handle_set_depth(const uint8_t *payload, uint16_t sequence)
     }
     bool valid = false;
     taskENTER_CRITICAL();
-    if (robot.state == RobotState::ARMED_ACTIVE && robot.float_enabled &&
+    if (robot.state == RobotState::ARMED_ACTIVE &&
+        (robot.body_control_enabled || robot.float_enabled) &&
         !robot.estop_locked)
     {
         robot.target_depth_cm = command.target_depth_cm;
@@ -540,22 +561,209 @@ void handle_set_motion(const uint8_t *payload, uint16_t sequence)
     const ProtoSetMotion command = decode_payload<ProtoSetMotion>(payload);
     if (command.motion_state > 7U)
     {
-        reject(sequence, ProtoMsg_SET_MOTION, ProtoNack_InvalidValue);
+        reject_body_command(sequence, ProtoMsg_SET_MOTION,
+                            ProtoNack_InvalidValue);
         return;
     }
-    bool valid = false;
+
+    BodyCommand body_command{};
+    switch (command.motion_state)
+    {
+    case 2U:
+        body_command.surge = kLegacySurge;
+        break;
+    case 3U:
+        body_command.surge = -kLegacySurge;
+        break;
+    case 4U:
+        body_command.sway = -kLegacySway;
+        break;
+    case 5U:
+        body_command.sway = kLegacySway;
+        break;
+    case 6U:
+        body_command.yaw = kLegacyYaw;
+        break;
+    case 7U:
+        body_command.yaw = -kLegacyYaw;
+        break;
+    default:
+        break;
+    }
+
+    const uint32_t now = HAL_GetTick();
+    bool accepted = false;
     taskENTER_CRITICAL();
-    if (robot.state == RobotState::ARMED_ACTIVE && robot.float_enabled &&
+    if (robot.state == RobotState::ARMED_ACTIVE &&
+        robot.control_enable &&
+        (robot.float_enabled || robot.body_control_enabled) &&
         !robot.estop_locked)
     {
-        robot.motion_state = command.motion_state;
-        robot.last_cmd_tick = HAL_GetTick();
-        valid = true;
+        robot.body_command = body_command;
+        robot.body_command_source = BodyCommandSource::LegacySetMotion;
+        robot.body_command_sequence = sequence;
+        robot.body_command_last_ms = now;
+        robot.body_command_timeout_ms =
+            robot.motion_tuning.command_timeout_ms;
+        robot.body_command_valid = true;
+        robot.last_cmd_tick = now;
+        robot.last_neutral_reason = ProtoNeutral_NONE;
+        accepted = true;
     }
     taskEXIT_CRITICAL();
-    if (!valid)
+    if (!accepted)
     {
-        reject(sequence, ProtoMsg_SET_MOTION, ProtoNack_BadState);
+        reject_body_command(sequence, ProtoMsg_SET_MOTION,
+                            ProtoNack_BadState);
+        return;
+    }
+    queue_ack(sequence);
+}
+
+void handle_set_body_command(const uint8_t *payload, uint16_t sequence)
+{
+    const ProtoSetBodyCommand wire =
+        decode_payload<ProtoSetBodyCommand>(payload);
+    const BodyCommand command{
+        wire.surge,
+        wire.sway,
+        wire.heave,
+        wire.roll,
+        wire.pitch,
+        wire.yaw,
+    };
+    if (!body_command_is_valid(command))
+    {
+        reject_body_command(sequence, ProtoMsg_SET_BODY_COMMAND,
+                            ProtoNack_InvalidValue);
+        return;
+    }
+
+    const uint32_t now = HAL_GetTick();
+    bool accepted = false;
+    taskENTER_CRITICAL();
+    if (robot.state == RobotState::ARMED_ACTIVE &&
+        robot.body_control_enabled &&
+        robot.control_enable &&
+        !robot.estop_locked)
+    {
+        robot.body_command = command;
+        robot.body_command_source = BodyCommandSource::BinaryProtocol;
+        robot.body_command_sequence = sequence;
+        robot.body_command_last_ms = now;
+        robot.body_command_timeout_ms =
+            robot.motion_tuning.command_timeout_ms;
+        robot.body_command_valid = true;
+        robot.last_cmd_tick = now;
+        robot.last_neutral_reason = ProtoNeutral_NONE;
+        accepted = true;
+    }
+    taskEXIT_CRITICAL();
+    if (!accepted)
+    {
+        reject_body_command(sequence, ProtoMsg_SET_BODY_COMMAND,
+                            ProtoNack_BadState);
+        return;
+    }
+    queue_ack(sequence);
+}
+
+void handle_body_control_on(uint16_t sequence)
+{
+    const uint32_t now = HAL_GetTick();
+    bool accepted = false;
+    bool changed = false;
+    taskENTER_CRITICAL();
+    if (!robot.estop_locked && robot.state == RobotState::ARMED_IDLE)
+    {
+        robot.control_enable = true;
+        robot.float_enabled = false;
+        robot.angle_enabled = false;
+        robot.body_control_enabled = true;
+        force_body_output_neutral(robot);
+        robot.last_cmd_tick = now;
+        robot.last_neutral_reason = ProtoNeutral_NONE;
+        changed = set_state_locked(RobotState::ARMED_ACTIVE, now);
+        accepted = true;
+    }
+    taskEXIT_CRITICAL();
+    if (!accepted)
+    {
+        reject(sequence, ProtoMsg_BODY_CONTROL_ON,
+               robot.estop_locked ? ProtoNack_EstopLocked
+                                  : ProtoNack_BadState);
+        return;
+    }
+    log_state_change(changed, RobotState::ARMED_ACTIVE);
+    queue_ack(sequence);
+}
+
+void handle_body_control_off(uint16_t sequence)
+{
+    const uint32_t now = HAL_GetTick();
+    bool accepted = false;
+    bool changed = false;
+    taskENTER_CRITICAL();
+    if (robot.state == RobotState::ARMED_ACTIVE &&
+        robot.body_control_enabled)
+    {
+        robot.control_enable = false;
+        robot.float_enabled = false;
+        robot.angle_enabled = false;
+        robot.body_control_enabled = false;
+        force_body_output_neutral(robot);
+        robot.last_neutral_reason = ProtoNeutral_COMMAND;
+        changed = set_state_locked(RobotState::ARMED_IDLE, now);
+        accepted = true;
+    }
+    taskEXIT_CRITICAL();
+    if (!accepted)
+    {
+        reject(sequence, ProtoMsg_BODY_CONTROL_OFF, ProtoNack_BadState);
+        return;
+    }
+    log_state_change(changed, RobotState::ARMED_IDLE);
+    queue_ack(sequence);
+}
+
+void handle_set_motion_tuning(const uint8_t *payload, uint16_t sequence)
+{
+    const ProtoMotionTuning wire =
+        decode_payload<ProtoMotionTuning>(payload);
+    MotionTuning tuning{};
+    for (uint8_t axis = 0U; axis < ROBOT_BODY_AXIS_COUNT; ++axis)
+    {
+        tuning.axis_gain[axis] = wire.axis_gain[axis];
+        tuning.axis_max_output[axis] = wire.axis_max_output[axis];
+    }
+    tuning.global_multiplier = wire.global_multiplier;
+    tuning.pwm_slew_rate_us_per_s = wire.pwm_slew_rate_us_per_s;
+    tuning.command_timeout_ms = wire.command_timeout_ms;
+
+    if (!motion_tuning_is_valid(tuning))
+    {
+        reject(sequence, ProtoMsg_SET_MOTION_TUNING,
+               ProtoNack_InvalidValue);
+        return;
+    }
+
+    bool accepted = false;
+    taskENTER_CRITICAL();
+    if (!robot.estop_locked &&
+        (robot.state == RobotState::DISARMED ||
+         robot.state == RobotState::ARMED_IDLE))
+    {
+        robot.motion_tuning = tuning;
+        robot.body_command_timeout_ms = tuning.command_timeout_ms;
+        robot.motion_tuning_generation++;
+        accepted = true;
+    }
+    taskEXIT_CRITICAL();
+    if (!accepted)
+    {
+        reject(sequence, ProtoMsg_SET_MOTION_TUNING,
+               robot.estop_locked ? ProtoNack_EstopLocked
+                                  : ProtoNack_BadState);
         return;
     }
     queue_ack(sequence);
@@ -624,6 +832,9 @@ extern "C" bool bp_queue_status_report(BinaryProtocol *bp,
     if (robot.angle_enabled) report.flags |= 0x04U;
     if (robot.manual_pwm_enabled) report.flags |= 0x08U;
     if (robot.estop_locked) report.flags |= 0x10U;
+    if (robot.body_control_enabled) report.flags |= 0x20U;
+    if (robot.horizontal_saturated) report.flags |= 0x40U;
+    if (robot.vertical_saturated) report.flags |= 0x80U;
     for (uint8_t channel = 0U; channel < kChannelCount; ++channel)
     {
         report.pwm[channel] = static_cast<int16_t>(robot.pwm[channel]);
@@ -670,6 +881,29 @@ extern "C" bool bp_queue_sensor_report(BinaryProtocol *bp,
         reinterpret_cast<const uint8_t *>(&report), sizeof(report), priority);
 }
 
+extern "C" bool bp_queue_motion_tuning_report(BinaryProtocol *bp,
+                                               BpTxPriority priority)
+{
+    if (bp == nullptr) return false;
+    ProtoMotionTuning report{};
+    taskENTER_CRITICAL();
+    for (uint8_t axis = 0U; axis < ROBOT_BODY_AXIS_COUNT; ++axis)
+    {
+        report.axis_gain[axis] = robot.motion_tuning.axis_gain[axis];
+        report.axis_max_output[axis] =
+            robot.motion_tuning.axis_max_output[axis];
+    }
+    report.global_multiplier = robot.motion_tuning.global_multiplier;
+    report.pwm_slew_rate_us_per_s =
+        robot.motion_tuning.pwm_slew_rate_us_per_s;
+    report.command_timeout_ms =
+        robot.motion_tuning.command_timeout_ms;
+    taskEXIT_CRITICAL();
+    return bp_send_frame_priority(
+        bp, ProtoMsg_MOTION_TUNING_REPORT,
+        reinterpret_cast<const uint8_t *>(&report), sizeof(report), priority);
+}
+
 extern "C" void bp_dispatch_frame(BinaryProtocol *bp, uint8_t type,
                                   uint16_t sequence, const uint8_t *payload,
                                   uint16_t payload_len)
@@ -684,7 +918,16 @@ extern "C" void bp_dispatch_frame(BinaryProtocol *bp, uint8_t type,
     if (payload_len != expected_length ||
         (expected_length > 0U && payload == nullptr))
     {
-        reject(sequence, type, ProtoNack_InvalidPayloadLength);
+        if (type == ProtoMsg_SET_MOTION ||
+            type == ProtoMsg_SET_BODY_COMMAND)
+        {
+            reject_body_command(sequence, type,
+                                ProtoNack_InvalidPayloadLength);
+        }
+        else
+        {
+            reject(sequence, type, ProtoNack_InvalidPayloadLength);
+        }
         return;
     }
 
@@ -741,12 +984,29 @@ extern "C" void bp_dispatch_frame(BinaryProtocol *bp, uint8_t type,
     case ProtoMsg_SET_MOTION:
         handle_set_motion(payload, sequence);
         break;
+    case ProtoMsg_SET_BODY_COMMAND:
+        handle_set_body_command(payload, sequence);
+        break;
+    case ProtoMsg_BODY_CONTROL_ON:
+        handle_body_control_on(sequence);
+        break;
+    case ProtoMsg_BODY_CONTROL_OFF:
+        handle_body_control_off(sequence);
+        break;
+    case ProtoMsg_SET_MOTION_TUNING:
+        handle_set_motion_tuning(payload, sequence);
+        break;
     case ProtoMsg_REQUEST_STATUS:
         if (!bp_queue_status_report(&bp_instance, BP_TX_PRIORITY_HIGH))
             increment_protocol_error();
         break;
     case ProtoMsg_REQUEST_SENSORS:
         if (!bp_queue_sensor_report(&bp_instance, BP_TX_PRIORITY_HIGH))
+            increment_protocol_error();
+        break;
+    case ProtoMsg_REQUEST_MOTION_TUNING:
+        if (!bp_queue_motion_tuning_report(
+                &bp_instance, BP_TX_PRIORITY_HIGH))
             increment_protocol_error();
         break;
     default:

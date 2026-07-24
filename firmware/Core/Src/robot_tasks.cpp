@@ -12,21 +12,26 @@ static volatile bool pca9685_ready = false;
 /*  Unified failsafe neutral                                           */
 /* ------------------------------------------------------------------ */
 
-static void SetControlFailsafeNeutral(uint8_t reason)
+static void SetControlFailsafeNeutralLocked(uint8_t reason)
 {
-  taskENTER_CRITICAL();
   robot.control_enable = false;
   robot.float_enabled = false;
   robot.angle_enabled = false;
+  robot.body_control_enabled = false;
   robot.manual_pwm_enabled = false;
-  robot.motion_state = 0;
   robot.active_test_channel = 0xFF;
   robot.last_neutral_reason = reason;
+  force_body_output_neutral(robot);
   for (int i = 0; i < 8; i++)
   {
-    robot.pwm[i] = ROBOT_PWM_NEUTRAL_US;
     robot.manual_pwm[i] = ROBOT_PWM_NEUTRAL_US;
   }
+}
+
+static void SetControlFailsafeNeutral(uint8_t reason)
+{
+  taskENTER_CRITICAL();
+  SetControlFailsafeNeutralLocked(reason);
   taskEXIT_CRITICAL();
 }
 
@@ -55,10 +60,17 @@ static void CheckHeartbeat(uint32_t now)
   {
     if ((now - last_hb) > timeout)
     {
-      SetControlFailsafeNeutral(ProtoNeutral_COMM_LOST);
       taskENTER_CRITICAL();
-      if (robot.state != RobotState::COMM_LOST)
+      if (robot.last_heartbeat_ms == last_hb &&
+          robot.heartbeat_timeout_ms == timeout &&
+          robot.state == state &&
+          (robot.state == RobotState::ARMED_IDLE ||
+           robot.state == RobotState::ARMED_ACTIVE ||
+           robot.state == RobotState::MANUAL_TEST) &&
+          ((now - robot.last_heartbeat_ms) >
+           robot.heartbeat_timeout_ms))
       {
+        SetControlFailsafeNeutralLocked(ProtoNeutral_COMM_LOST);
         robot.state = RobotState::COMM_LOST;
         robot.state_changed_ms = now;
         robot.heartbeat_missed++;
@@ -88,11 +100,70 @@ static void CheckChannelTimeout(uint32_t now)
       static_cast<int32_t>(now - deadline) >= 0)
   {
     taskENTER_CRITICAL();
-    robot.pwm[active_ch] = ROBOT_PWM_NEUTRAL_US;
-    robot.manual_pwm[active_ch] = ROBOT_PWM_NEUTRAL_US;
-    robot.active_test_channel = 0xFF;
-    robot.manual_pwm_enabled = false;
-    robot.last_neutral_reason = ProtoNeutral_PWM_COMMAND_TIMEOUT;
+    if (robot.manual_pwm_enabled &&
+        robot.active_test_channel == active_ch &&
+        robot.channel_test_deadline == deadline &&
+        static_cast<int32_t>(now - robot.channel_test_deadline) >= 0)
+    {
+      robot.pwm[active_ch] = ROBOT_PWM_NEUTRAL_US;
+      robot.manual_pwm[active_ch] = ROBOT_PWM_NEUTRAL_US;
+      robot.active_test_channel = 0xFF;
+      robot.manual_pwm_enabled = false;
+      robot.last_neutral_reason = ProtoNeutral_PWM_COMMAND_TIMEOUT;
+      mark_pwm_output_updated(robot);
+    }
+    taskEXIT_CRITICAL();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Unified body command timeout                                      */
+/* ------------------------------------------------------------------ */
+
+static void CheckBodyCommandTimeout(uint32_t now)
+{
+  bool valid;
+  uint32_t last_ms;
+  uint32_t timeout_ms;
+  RobotState state;
+  BodyCommandSource source;
+  uint16_t sequence;
+  BodyCommand command;
+  bool body_control_enabled;
+
+  taskENTER_CRITICAL();
+  valid = robot.body_command_valid;
+  last_ms = robot.body_command_last_ms;
+  timeout_ms = robot.body_command_timeout_ms;
+  state = robot.state;
+  source = robot.body_command_source;
+  sequence = robot.body_command_sequence;
+  command = robot.body_command;
+  body_control_enabled = robot.body_control_enabled;
+  taskEXIT_CRITICAL();
+
+  if (valid &&
+      !body_command_is_zero(command) &&
+      body_control_enabled &&
+      state == RobotState::ARMED_ACTIVE &&
+      ((now - last_ms) > timeout_ms))
+  {
+    taskENTER_CRITICAL();
+    if (robot.body_command_valid &&
+        robot.state == state &&
+        robot.body_command_source == source &&
+        robot.body_command_sequence == sequence &&
+        robot.body_command_last_ms == last_ms &&
+        robot.body_command_timeout_ms == timeout_ms &&
+        robot.body_control_enabled &&
+        !body_command_is_zero(robot.body_command) &&
+        ((now - robot.body_command_last_ms) >
+         robot.body_command_timeout_ms))
+    {
+      SetControlFailsafeNeutralLocked(ProtoNeutral_COMMAND);
+      robot.state = RobotState::ARMED_IDLE;
+      robot.state_changed_ms = now;
+    }
     taskEXIT_CRITICAL();
   }
 }
@@ -173,6 +244,9 @@ extern "C" void ControlTaskFunc(void *argument)
     /* --- Channel test timeout --- */
     CheckChannelTimeout(now);
 
+    /* --- Unified body command timeout --- */
+    CheckBodyCommandTimeout(now);
+
     /* === ESTOP lock: force neutral regardless of anything else === */
     bool estop_locked;
     RobotState state;
@@ -190,11 +264,13 @@ extern "C" void ControlTaskFunc(void *argument)
       continue;
     }
 
-    /* --- Command timeout (legacy failsafe, for text protocol) --- */
+    /* --- General control-command timeout --- */
     bool control_enable;
+    bool body_control_enabled;
     uint32_t last_cmd_tick;
     taskENTER_CRITICAL();
     control_enable = robot.control_enable;
+    body_control_enabled = robot.body_control_enabled;
     last_cmd_tick  = robot.last_cmd_tick;
     taskEXIT_CRITICAL();
 
@@ -202,19 +278,35 @@ extern "C" void ControlTaskFunc(void *argument)
         state == RobotState::COMM_LOST ||
         state == RobotState::FAULT)
     {
-      /* Force neutral in unsafe states */
-      if (control_enable)
+      /* Re-check under the same lock used to apply the neutral state so a
+       * freshly accepted command cannot be cleared by a stale snapshot. */
+      taskENTER_CRITICAL();
+      const RobotState live_state = robot.state;
+      if (robot.control_enable &&
+          (live_state == RobotState::DISARMED ||
+           live_state == RobotState::COMM_LOST ||
+           live_state == RobotState::FAULT))
       {
         uint8_t reason = ProtoNeutral_FAULT;
-        if (state == RobotState::DISARMED) reason = ProtoNeutral_DISARM;
-        if (state == RobotState::COMM_LOST) reason = ProtoNeutral_COMM_LOST;
-        SetControlFailsafeNeutral(reason);
+        if (live_state == RobotState::DISARMED) reason = ProtoNeutral_DISARM;
+        if (live_state == RobotState::COMM_LOST) reason = ProtoNeutral_COMM_LOST;
+        SetControlFailsafeNeutralLocked(reason);
       }
+      taskEXIT_CRITICAL();
     }
-    else if (control_enable &&
+    else if (control_enable && !body_control_enabled &&
              ((now - last_cmd_tick) > ROBOT_COMMAND_TIMEOUT_MS))
     {
-      SetControlFailsafeNeutral(ProtoNeutral_COMMAND);
+      taskENTER_CRITICAL();
+      if (robot.control_enable &&
+          !robot.body_control_enabled &&
+          robot.state == state &&
+          robot.last_cmd_tick == last_cmd_tick &&
+          ((now - robot.last_cmd_tick) > ROBOT_COMMAND_TIMEOUT_MS))
+      {
+        SetControlFailsafeNeutralLocked(ProtoNeutral_COMMAND);
+      }
+      taskEXIT_CRITICAL();
     }
 
     /* --- Motor control --- */

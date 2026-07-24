@@ -2,7 +2,10 @@
 #include "PID.h"
 #include <cstdint>
 
-// 8-motor PID cascade + thrust allocation.
+struct BodyCommand;
+struct MotionTuning;
+
+// 8-channel thruster PID cascade + force allocation.
 // Reads sensor/AHRS/target data from DataBus, writes robot.pwm[8].
 class MotorControl {
 public:
@@ -12,9 +15,19 @@ public:
 private:
     void float_ctrl();
     void angle_ctrl();
-    void vertical_allocation();
-    void horizontal_allocation();
-    void apply_pwm_limits();
+    bool calculate_body_outputs(const BodyCommand &command,
+                                bool float_enabled,
+                                bool angle_enabled,
+                                const MotionTuning &tuning,
+                                float mixed_output[8],
+                                int32_t pwm_output[8],
+                                bool &horizontal_saturated,
+                                bool &vertical_saturated);
+    void apply_pwm_slew(const int32_t desired_pwm[8],
+                        const int32_t current_pwm[8],
+                        const MotionTuning &tuning,
+                        uint32_t now,
+                        int32_t pwm_output[8]);
     void set_output_neutral();
     void copy_manual_pwm();
 
@@ -27,10 +40,5 @@ private:
     float target_roll_v_ = 0, target_pitch_v_ = 0, target_yaw_v_ = 0;
 
     int32_t InitPWM_ = 1500;
-    int8_t  Sign_[8];
-    uint8_t InID_[4];
-    uint8_t OutID_[4];
-    int32_t Compensation_[8];
-    int32_t FloatPWM_[4];
-    int32_t state_pwm_map_[8][4];
+    uint32_t last_slew_update_ms_ = 0;
 };

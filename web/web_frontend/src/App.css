@@ -118,6 +118,33 @@ button {
   padding: 18px 22px 26px;
 }
 
+.page-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0e1821;
+}
+
+.page-tabs button {
+  min-height: 38px;
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.page-tabs button.is-active {
+  border-color: #315067;
+  background: #192a37;
+  color: #eaf2f7;
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -448,6 +475,10 @@ button {
   font-weight: 800;
 }
 
+.control-summary__value.is-ready {
+  color: #8fe0b7;
+}
+
 .control-summary__actions {
   display: flex;
   gap: 8px;
@@ -520,6 +551,35 @@ button {
 .slider-block input[type="range"] {
   width: 100%;
   accent-color: var(--cyan);
+}
+
+.pwm-value-editor {
+  display: grid;
+  grid-template-columns: auto auto minmax(84px, 120px) auto auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.pwm-value-editor button,
+.pwm-value-editor input {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #101b25;
+  color: var(--text);
+  text-align: center;
+}
+
+.pwm-value-editor button {
+  padding: 5px 9px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.pwm-value-editor button:disabled,
+.pwm-value-editor input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .slider-scale {
@@ -619,6 +679,205 @@ button {
   color: #ff9999;
 }
 
+.motion-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(8, 17, 24, 0.48);
+}
+
+.tuning-table {
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.tuning-table__head,
+.tuning-table__row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+}
+
+.tuning-table__head {
+  background: #0c151d;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tuning-table__row {
+  border-top: 1px solid var(--line-soft);
+  background: rgba(8, 17, 24, 0.36);
+}
+
+.tuning-table__row > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tuning-table__row small {
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.tuning-table__row label,
+.global-tuning-grid label > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.tuning-table input,
+.global-tuning-grid input[type="number"] {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0d1821;
+  color: #edf5fa;
+}
+
+.tuning-table input:disabled,
+.global-tuning-grid input:disabled {
+  opacity: 0.48;
+}
+
+.tuning-table label span,
+.global-tuning-grid label span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.global-tuning-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.global-tuning-grid > label {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(8, 17, 24, 0.44);
+}
+
+.global-tuning-grid input[type="range"] {
+  width: 100%;
+  accent-color: var(--cyan);
+}
+
+.axis-control-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 20px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.axis-control-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.axis-control-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.axis-control-state {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.axis-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.axis-control {
+  display: grid;
+  grid-template-columns: minmax(80px, 0.7fr) repeat(2, minmax(100px, 1fr));
+  gap: 8px;
+  align-items: stretch;
+  padding: 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(8, 17, 24, 0.46);
+}
+
+.axis-control__name {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding-left: 4px;
+}
+
+.axis-control__name span {
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
+.axis-button {
+  display: grid;
+  min-height: 58px;
+  place-content: center;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #152431;
+  color: #e5eef4;
+  cursor: pointer;
+  font-weight: 800;
+  touch-action: none;
+  user-select: none;
+}
+
+.axis-button small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.axis-button--negative {
+  border-color: rgba(66, 165, 245, 0.38);
+}
+
+.axis-button--positive {
+  border-color: rgba(54, 194, 180, 0.4);
+}
+
+.axis-button.is-held {
+  border-color: #ffd37a;
+  background: #76531e;
+  color: #fff6dc;
+  transform: translateY(1px);
+}
+
+.axis-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
 .event-log {
   height: 180px;
   overflow: auto;
@@ -672,6 +931,11 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .global-tuning-grid,
+  .axis-control-grid {
+    grid-template-columns: 1fr;
+  }
+
   .channel-grid,
   .output-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -706,9 +970,44 @@ button {
   }
 
   .control-summary,
-  .system-state {
+  .system-state,
+  .motion-toolbar,
+  .axis-control-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .page-tabs button {
+    flex: 1;
+  }
+
+  .pwm-value-editor {
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .pwm-value-editor input {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .tuning-table__head {
+    display: none;
+  }
+
+  .tuning-table__row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .tuning-table__row > div {
+    grid-column: 1 / -1;
+  }
+
+  .axis-control {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .axis-control__name {
+    grid-column: 1 / -1;
   }
 
   .btn {

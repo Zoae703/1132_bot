@@ -1,14 +1,32 @@
 #include "motor_control.h"
 #include "main.h"
 #include "robot_data.hpp"
+#include "thruster_config.hpp"
 #include "FreeRTOS.h"
 #include "task.h"
+
+#include <algorithm>
 #include <cmath>
 
 #define MC_PI 3.14159265358979323846f
 
-// Motion states (match RobotData::motion_state encoding)
-enum { ST_STOP = 0, ST_FLOAT, ST_FRONT, ST_BACK, ST_LEFT, ST_RIGHT, ST_CLOCKWISE, ST_ANTICLOCKWISE };
+namespace {
+
+constexpr float kHorizontalSpanUs = 450.0F;
+constexpr float kVerticalSpanUs = 350.0F;
+constexpr uint8_t kNeutralReasonCommand = 1U;
+
+int32_t add_deadzone_compensation(int32_t pwm, int32_t neutral,
+                                  uint16_t compensation_us)
+{
+    if (pwm > neutral) {
+        return pwm + static_cast<int32_t>(compensation_us);
+    }
+    if (pwm < neutral) {
+        return pwm - static_cast<int32_t>(compensation_us);
+    }
+    return pwm;
+}
 
 static float normalize_angle(float angle) {
     angle = fmodf(angle + MC_PI, 2.0f * MC_PI);
@@ -23,9 +41,44 @@ static int32_t clamp_motor_pwm(int32_t pwm) {
 }
 
 static void set_all_pwm_neutral(int32_t neutral) {
-    for (int i = 0; i < 8; i++)
-        robot.pwm[i] = neutral;
+    for (const auto &thruster : thruster_config::kThrusters) {
+        robot.pwm[thruster.channel] = neutral;
+    }
 }
+
+void neutralize_computed_output_locked(int32_t neutral)
+{
+    set_all_pwm_neutral(neutral);
+    for (float &output : robot.mixed_output)
+    {
+        output = 0.0F;
+    }
+    robot.horizontal_saturated = false;
+    robot.vertical_saturated = false;
+    mark_pwm_output_updated(robot);
+}
+
+bool body_command_is_finite(const BodyCommand &command)
+{
+    return std::isfinite(command.surge) &&
+           std::isfinite(command.sway) &&
+           std::isfinite(command.heave) &&
+           std::isfinite(command.roll) &&
+           std::isfinite(command.pitch) &&
+           std::isfinite(command.yaw);
+}
+
+bool body_commands_equal(const BodyCommand &lhs, const BodyCommand &rhs)
+{
+    return lhs.surge == rhs.surge &&
+           lhs.sway == rhs.sway &&
+           lhs.heave == rhs.heave &&
+           lhs.roll == rhs.roll &&
+           lhs.pitch == rhs.pitch &&
+           lhs.yaw == rhs.yaw;
+}
+
+} // namespace
 
 void MotorControl::Init() {
     // PID gains (kp, ki, kd, KpMax, KiMax, KdMax, OutMax) — from reference
@@ -37,41 +90,8 @@ void MotorControl::Init() {
     yaw_out_pid_.PIDInfo   = PID_Regulator_t(2, 0.01f, 2, 10, 5, 5, 20);
     yaw_in_pid_.PIDInfo    = PID_Regulator_t(5, 0, 0, 200, 100, 100, 400);
 
-    // Motor layout (from reference)
-    const int8_t  sign[8]  = {1, -1, 1, 1, -1, -1, 1, -1};
-    const uint8_t inid[4]  = {1, 2, 6, 5};
-    const uint8_t outid[4] = {0, 3, 7, 4};
-    for (int i = 0; i < 8; i++) { Sign_[i] = sign[i]; Compensation_[i] = 50; }
-    for (int i = 0; i < 4; i++) { InID_[i] = inid[i]; OutID_[i] = outid[i]; }
-
     InitPWM_ = ROBOT_PWM_NEUTRAL_US;
-
-    // Vertical neutral PWM with small trim (verbatim from reference)
-    FloatPWM_[0] = InitPWM_;
-    FloatPWM_[1] = InitPWM_ - Sign_[InID_[1]] * 100;
-    FloatPWM_[2] = InitPWM_;
-    FloatPWM_[3] = InitPWM_ - Sign_[InID_[3]] * 90;
-
-    const int32_t li = 80, la = 80, ro = 40;  // longitudinal / lateral / rotate speed
-
-    for (int i = 0; i < 4; i++) {
-        int32_t s = Sign_[OutID_[i]];
-        state_pwm_map_[ST_STOP][i]  = InitPWM_;
-        state_pwm_map_[ST_FLOAT][i] = InitPWM_;
-        state_pwm_map_[ST_FRONT][i] = InitPWM_ - s * li;
-        state_pwm_map_[ST_BACK][i]  = InitPWM_ + s * li;
-        state_pwm_map_[ST_CLOCKWISE][i]     = (i < 2) ? (InitPWM_ - s * ro) : (InitPWM_ + s * ro);
-        state_pwm_map_[ST_ANTICLOCKWISE][i] = (i < 2) ? (InitPWM_ + s * ro) : (InitPWM_ - s * ro);
-    }
-    // Left / Right (per-index sign pattern from reference)
-    state_pwm_map_[ST_LEFT][0]  = InitPWM_ + Sign_[OutID_[0]] * la;
-    state_pwm_map_[ST_LEFT][1]  = InitPWM_ - Sign_[OutID_[1]] * la;
-    state_pwm_map_[ST_LEFT][2]  = InitPWM_ - Sign_[OutID_[2]] * la;
-    state_pwm_map_[ST_LEFT][3]  = InitPWM_ + Sign_[OutID_[3]] * la;
-    state_pwm_map_[ST_RIGHT][0] = InitPWM_ - Sign_[OutID_[0]] * la;
-    state_pwm_map_[ST_RIGHT][1] = InitPWM_ + Sign_[OutID_[1]] * la;
-    state_pwm_map_[ST_RIGHT][2] = InitPWM_ + Sign_[OutID_[2]] * la;
-    state_pwm_map_[ST_RIGHT][3] = InitPWM_ - Sign_[OutID_[3]] * la;
+    last_slew_update_ms_ = HAL_GetTick();
 }
 
 void MotorControl::float_ctrl() {
@@ -100,79 +120,237 @@ void MotorControl::angle_ctrl() {
     pwm_comp_.yaw = yaw_in_pid_.PIDCalc(target_yaw_v_, robot.yaw_v);
 }
 
-void MotorControl::vertical_allocation() {
-    if (!robot.float_enabled) return;
-    float_ctrl();
+bool MotorControl::calculate_body_outputs(
+    const BodyCommand &command,
+    bool float_enabled,
+    bool angle_enabled,
+    const MotionTuning &tuning,
+    float mixed_output[8],
+    int32_t pwm_output[8],
+    bool &horizontal_saturated,
+    bool &vertical_saturated)
+{
+    if (!body_command_is_valid(command))
+    {
+        return false;
+    }
 
-    constexpr int8_t factors[4][3] = {
-        {-1, -1, -1},  // Motor 0
-        {-1, -1,  1},  // Motor 1
-        {-1,  1, -1},  // Motor 2
-        {-1,  1,  1}   // Motor 3
+    if (!motion_tuning_is_valid(tuning))
+    {
+        return false;
+    }
+
+    if (float_enabled)
+    {
+        float_ctrl();
+    }
+    else
+    {
+        pwm_comp_.depth = 0.0F;
+        pwm_comp_.roll = 0.0F;
+        pwm_comp_.pitch = 0.0F;
+    }
+
+    if (angle_enabled)
+    {
+        angle_ctrl();
+    }
+    else
+    {
+        pwm_comp_.yaw = 0.0F;
+    }
+
+    BodyCommand combined = command;
+    combined.heave += pwm_comp_.depth / kVerticalSpanUs;
+    combined.roll += pwm_comp_.roll / kVerticalSpanUs;
+    combined.pitch += pwm_comp_.pitch / kVerticalSpanUs;
+    combined.yaw += pwm_comp_.yaw / kHorizontalSpanUs;
+    if (!body_command_is_finite(combined))
+    {
+        return false;
+    }
+
+    float axes[ROBOT_BODY_AXIS_COUNT] = {
+        combined.surge,
+        combined.sway,
+        combined.heave,
+        combined.roll,
+        combined.pitch,
+        combined.yaw,
+    };
+    bool axis_limited[ROBOT_BODY_AXIS_COUNT] = {
+        false, false, false, false, false, false,
+    };
+    for (uint8_t axis = 0U; axis < ROBOT_BODY_AXIS_COUNT; ++axis)
+    {
+        const float scaled = axes[axis] * tuning.axis_gain[axis];
+        const float limited = std::clamp(
+            scaled,
+            -tuning.axis_max_output[axis],
+            tuning.axis_max_output[axis]);
+        axis_limited[axis] = limited != scaled;
+        axes[axis] = limited * tuning.global_multiplier;
+    }
+    combined = BodyCommand{
+        axes[0], axes[1], axes[2], axes[3], axes[4], axes[5],
     };
 
-    for (int i = 0; i < 4; i++) {
-        uint8_t idx  = InID_[i];
-        int8_t  sign = Sign_[idx];
-        int32_t base = FloatPWM_[i];
-        int32_t comp = Compensation_[idx];
-
-        float adj = sign * (pwm_comp_.depth * factors[i][0] +
-                            pwm_comp_.roll  * factors[i][1] +
-                            pwm_comp_.pitch * factors[i][2]);
-        int32_t pwm = base - (int32_t)adj;
-
-        if (pwm > InitPWM_)      pwm += comp;
-        else if (pwm < InitPWM_) pwm -= comp;
-        robot.pwm[idx] = clamp_motor_pwm(pwm);
+    if (body_command_is_zero(combined))
+    {
+        for (uint8_t channel = 0U; channel < 8U; ++channel)
+        {
+            mixed_output[channel] = 0.0F;
+            pwm_output[channel] = InitPWM_;
+        }
+        horizontal_saturated =
+            axis_limited[0] || axis_limited[1] || axis_limited[5];
+        vertical_saturated =
+            axis_limited[2] || axis_limited[3] || axis_limited[4];
+        return true;
     }
+
+    float raw_output[8] = {0.0F};
+    float horizontal_max = 0.0F;
+    float vertical_max = 0.0F;
+
+    for (const auto &thruster : thruster_config::kThrusters)
+    {
+        float raw = 0.0F;
+        if (thruster.orientation ==
+            thruster_config::Orientation::HorizontalDiagonal)
+        {
+            raw =
+                static_cast<float>(thruster_config::axis_direction(
+                    thruster, thruster_config::ControlAxis::SurgeX)) *
+                    combined.surge +
+                static_cast<float>(thruster_config::axis_direction(
+                    thruster, thruster_config::ControlAxis::SwayY)) *
+                    combined.sway +
+                static_cast<float>(thruster_config::axis_direction(
+                    thruster, thruster_config::ControlAxis::YawZ)) *
+                    combined.yaw;
+            horizontal_max = std::max(horizontal_max, std::fabs(raw));
+        }
+        else
+        {
+            raw =
+                static_cast<float>(thruster_config::axis_direction(
+                    thruster, thruster_config::ControlAxis::HeaveZ)) *
+                    combined.heave +
+                static_cast<float>(thruster_config::axis_direction(
+                    thruster, thruster_config::ControlAxis::RollX)) *
+                    combined.roll +
+                static_cast<float>(thruster_config::axis_direction(
+                    thruster, thruster_config::ControlAxis::PitchY)) *
+                    combined.pitch;
+            vertical_max = std::max(vertical_max, std::fabs(raw));
+        }
+
+        if (!std::isfinite(raw))
+        {
+            return false;
+        }
+        raw_output[thruster.channel] = raw;
+    }
+
+    const bool horizontal_group_saturated = horizontal_max > 1.0F;
+    const bool vertical_group_saturated = vertical_max > 1.0F;
+    horizontal_saturated =
+        horizontal_group_saturated ||
+        axis_limited[0] || axis_limited[1] || axis_limited[5];
+    vertical_saturated =
+        vertical_group_saturated ||
+        axis_limited[2] || axis_limited[3] || axis_limited[4];
+    const float horizontal_scale =
+        horizontal_group_saturated ? (1.0F / horizontal_max) : 1.0F;
+    const float vertical_scale =
+        vertical_group_saturated ? (1.0F / vertical_max) : 1.0F;
+
+    for (const auto &thruster : thruster_config::kThrusters)
+    {
+        const bool horizontal =
+            thruster.orientation ==
+            thruster_config::Orientation::HorizontalDiagonal;
+        const float scale = horizontal ? horizontal_scale : vertical_scale;
+        const float span = horizontal ? kHorizontalSpanUs : kVerticalSpanUs;
+        const float normalized = raw_output[thruster.channel] * scale;
+        if (!std::isfinite(normalized) ||
+            normalized < -1.0F || normalized > 1.0F)
+        {
+            return false;
+        }
+
+        mixed_output[thruster.channel] = normalized;
+        const float pwm_delta_f = normalized * span;
+        const int32_t pwm_delta = static_cast<int32_t>(
+            pwm_delta_f >= 0.0F ? pwm_delta_f + 0.5F
+                                : pwm_delta_f - 0.5F);
+        int32_t pwm = InitPWM_;
+        if (pwm_delta != 0)
+        {
+            pwm += static_cast<int32_t>(thruster.neutral_trim_us) +
+                   pwm_delta;
+            pwm = add_deadzone_compensation(
+                pwm, InitPWM_, thruster.deadzone_compensation_us);
+        }
+        pwm_output[thruster.channel] = clamp_motor_pwm(pwm);
+    }
+
+    return true;
 }
 
-void MotorControl::horizontal_allocation() {
-    if (!robot.float_enabled) return;
+void MotorControl::apply_pwm_slew(const int32_t desired_pwm[8],
+                                  const int32_t current_pwm[8],
+                                  const MotionTuning &tuning,
+                                  uint32_t now,
+                                  int32_t pwm_output[8])
+{
+    uint32_t elapsed_ms = now - last_slew_update_ms_;
+    if (elapsed_ms == 0U) elapsed_ms = 20U;
+    if (elapsed_ms > 100U) elapsed_ms = 100U;
+    uint32_t max_step =
+        (static_cast<uint32_t>(tuning.pwm_slew_rate_us_per_s) *
+         elapsed_ms + 999U) / 1000U;
+    if (max_step == 0U) max_step = 1U;
 
-    float yaw_comp = 0;
-    if (robot.angle_enabled) {
-        angle_ctrl();
-        yaw_comp = pwm_comp_.yaw;
+    for (uint8_t channel = 0U; channel < 8U; ++channel)
+    {
+        const int32_t current = current_pwm[channel];
+        const int32_t desired = desired_pwm[channel];
+        if (desired > current)
+        {
+            pwm_output[channel] = std::min(
+                desired, current + static_cast<int32_t>(max_step));
+        }
+        else if (desired < current)
+        {
+            pwm_output[channel] = std::max(
+                desired, current - static_cast<int32_t>(max_step));
+        }
+        else
+        {
+            pwm_output[channel] = desired;
+        }
     }
-
-    int state = robot.motion_state;
-    if (state < 0 || state >= 8) state = ST_STOP;
-
-    for (int i = 0; i < 4; i++) {
-        uint8_t idx  = OutID_[i];
-        int32_t sign = Sign_[idx];
-        int32_t comp = Compensation_[idx];
-        int32_t base = state_pwm_map_[state][i];
-
-        float adj = ((i < 2) ? sign : -sign) * yaw_comp;
-        int32_t pwm = base + (int32_t)adj;
-
-        if (pwm > InitPWM_)      pwm += comp;
-        else if (pwm < InitPWM_) pwm -= comp;
-        robot.pwm[idx] = clamp_motor_pwm(pwm);
-    }
-}
-
-void MotorControl::apply_pwm_limits() {
-    for (int i = 0; i < 8; i++) {
-        robot.pwm[i] = clamp_motor_pwm(robot.pwm[i]);
-    }
+    last_slew_update_ms_ = now;
 }
 
 void MotorControl::set_output_neutral() {
-    set_all_pwm_neutral(InitPWM_);
+    force_body_output_neutral(robot);
 }
 
 void MotorControl::copy_manual_pwm() {
-    for (int i = 0; i < 8; i++) {
-        robot.pwm[i] = clamp_motor_pwm(robot.manual_pwm[i]);
+    for (const auto &thruster : thruster_config::kThrusters) {
+        robot.pwm[thruster.channel] =
+            clamp_motor_pwm(robot.manual_pwm[thruster.channel]);
     }
+    mark_pwm_output_updated(robot);
 }
 
 void MotorControl::Update() {
+    taskENTER_CRITICAL();
     robot.loop_count++;
+    taskEXIT_CRITICAL();
 
     /* === State-machine-gated PWM output === */
 
@@ -191,12 +369,22 @@ void MotorControl::Update() {
         state == RobotState::FAULT)
     {
         taskENTER_CRITICAL();
-        robot.manual_pwm_enabled = false;
-        robot.float_enabled = false;
-        robot.angle_enabled = false;
-        robot.motion_state = ST_STOP;
-        robot.active_test_channel = 0xFF;
-        set_output_neutral();
+        const bool live_unsafe =
+            robot.estop_locked ||
+            robot.state == RobotState::DISARMED ||
+            robot.state == RobotState::COMM_LOST ||
+            robot.state == RobotState::EMERGENCY_STOP ||
+            robot.state == RobotState::FAULT;
+        if (live_unsafe)
+        {
+            robot.control_enable = false;
+            robot.manual_pwm_enabled = false;
+            robot.float_enabled = false;
+            robot.angle_enabled = false;
+            robot.body_control_enabled = false;
+            robot.active_test_channel = 0xFF;
+            set_output_neutral();
+        }
         taskEXIT_CRITICAL();
         return;
     }
@@ -205,8 +393,12 @@ void MotorControl::Update() {
     if (state == RobotState::ARMED_IDLE)
     {
         taskENTER_CRITICAL();
-        robot.manual_pwm_enabled = false;
-        set_output_neutral();
+        if (robot.state == RobotState::ARMED_IDLE)
+        {
+            robot.manual_pwm_enabled = false;
+            robot.body_control_enabled = false;
+            set_output_neutral();
+        }
         taskEXIT_CRITICAL();
         return;
     }
@@ -214,37 +406,36 @@ void MotorControl::Update() {
     /* MANUAL_TEST: single-channel PWM only */
     if (state == RobotState::MANUAL_TEST)
     {
-        bool manual_enabled;
-        uint8_t active_ch;
         taskENTER_CRITICAL();
-        manual_enabled = robot.manual_pwm_enabled;
-        active_ch = robot.active_test_channel;
-        taskEXIT_CRITICAL();
+        if (robot.state != RobotState::MANUAL_TEST)
+        {
+            taskEXIT_CRITICAL();
+            return;
+        }
 
-        if (manual_enabled && active_ch < 8U)
+        invalidate_body_command(robot);
+        robot.body_control_enabled = false;
+        const uint8_t active_ch = robot.active_test_channel;
+        if (robot.manual_pwm_enabled && active_ch < 8U)
         {
             /* Only copy the active channel; all others stay neutral */
-            taskENTER_CRITICAL();
-            int32_t val = robot.manual_pwm[active_ch];
-            taskEXIT_CRITICAL();
-            val = clamp_motor_pwm(val);
-
-            taskENTER_CRITICAL();
-            for (int i = 0; i < 8; i++)
-                robot.pwm[i] = InitPWM_;
+            const int32_t val =
+                clamp_motor_pwm(robot.manual_pwm[active_ch]);
+            for (const auto &thruster : thruster_config::kThrusters) {
+                robot.pwm[thruster.channel] = InitPWM_;
+            }
             robot.pwm[active_ch] = val;
-            taskEXIT_CRITICAL();
+            mark_pwm_output_updated(robot);
         }
         else
         {
-            taskENTER_CRITICAL();
             set_output_neutral();
-            taskEXIT_CRITICAL();
         }
+        taskEXIT_CRITICAL();
         return;
     }
 
-    /* === ARMED_ACTIVE: legacy PID cascade === */
+    /* === ARMED_ACTIVE: unified body command + PID correction === */
 
     bool control_enable;
     bool manual_pwm_enabled;
@@ -257,46 +448,223 @@ void MotorControl::Update() {
 
     if (!control_enable) {
         taskENTER_CRITICAL();
-        robot.manual_pwm_enabled = false;
-        robot.float_enabled = false;
-        robot.angle_enabled = false;
-        robot.motion_state = ST_STOP;
-        set_output_neutral();
+        if (robot.state == RobotState::ARMED_ACTIVE &&
+            !robot.control_enable)
+        {
+            robot.manual_pwm_enabled = false;
+            robot.float_enabled = false;
+            robot.angle_enabled = false;
+            robot.body_control_enabled = false;
+            set_output_neutral();
+        }
         taskEXIT_CRITICAL();
         return;
     }
 
     if (manual_pwm_enabled) {
-        uint32_t elapsed_ms = HAL_GetTick() - manual_pwm_last_ms;
-        if (elapsed_ms <= ROBOT_MANUAL_PWM_TIMEOUT_MS) {
-            taskENTER_CRITICAL();
+        bool continue_body_control = false;
+        taskENTER_CRITICAL();
+        if (robot.state != RobotState::ARMED_ACTIVE ||
+            !robot.manual_pwm_enabled ||
+            robot.manual_pwm_last_ms != manual_pwm_last_ms)
+        {
+            taskEXIT_CRITICAL();
+            return;
+        }
+
+        const uint32_t elapsed_ms =
+            HAL_GetTick() - robot.manual_pwm_last_ms;
+        if (elapsed_ms <= ROBOT_MANUAL_PWM_TIMEOUT_MS)
+        {
+            invalidate_body_command(robot);
             copy_manual_pwm();
             taskEXIT_CRITICAL();
             return;
         }
 
-        taskENTER_CRITICAL();
         robot.manual_pwm_enabled = false;
-        bool float_enabled = robot.float_enabled;
-        if (!float_enabled) {
+        continue_body_control =
+            robot.float_enabled ||
+            robot.angle_enabled ||
+            robot.body_control_enabled;
+        if (!continue_body_control)
+        {
             set_output_neutral();
         }
         taskEXIT_CRITICAL();
 
-        if (!float_enabled) {
+        if (!continue_body_control)
+        {
             return;
         }
     }
 
-    if (robot.float_enabled) {
-        vertical_allocation();
-        horizontal_allocation();
+    BodyCommand command{};
+    BodyCommandSource source = BodyCommandSource::None;
+    uint16_t sequence = 0U;
+    uint32_t last_ms = 0U;
+    uint32_t timeout_ms = ROBOT_BODY_COMMAND_TIMEOUT_MS;
+    bool command_valid = false;
+    bool float_enabled = false;
+    bool angle_enabled = false;
+    bool body_control_enabled = false;
+    MotionTuning tuning{};
+    uint32_t tuning_generation = 0U;
+    taskENTER_CRITICAL();
+    command = robot.body_command;
+    source = robot.body_command_source;
+    sequence = robot.body_command_sequence;
+    last_ms = robot.body_command_last_ms;
+    timeout_ms = robot.body_command_timeout_ms;
+    command_valid = robot.body_command_valid;
+    float_enabled = robot.float_enabled;
+    angle_enabled = robot.angle_enabled;
+    body_control_enabled = robot.body_control_enabled;
+    tuning = robot.motion_tuning;
+    tuning_generation = robot.motion_tuning_generation;
+    taskEXIT_CRITICAL();
+
+    if (!body_control_enabled && !float_enabled && !angle_enabled)
+    {
         taskENTER_CRITICAL();
-        apply_pwm_limits();
+        if (robot.state == RobotState::ARMED_ACTIVE &&
+            !robot.body_control_enabled &&
+            !robot.float_enabled &&
+            !robot.angle_enabled)
+        {
+            robot.control_enable = false;
+            set_output_neutral();
+        }
         taskEXIT_CRITICAL();
-    } else {
+        return;
+    }
+
+    if (command_valid && !body_command_is_valid(command))
+    {
         taskENTER_CRITICAL();
+        if (robot.body_command_valid &&
+            robot.body_command_source == source &&
+            robot.body_command_sequence == sequence)
+        {
+            robot.control_enable = false;
+            robot.float_enabled = false;
+            robot.angle_enabled = false;
+            robot.body_control_enabled = false;
+            robot.last_neutral_reason = kNeutralReasonCommand;
+            robot.state = RobotState::ARMED_IDLE;
+            robot.state_changed_ms = HAL_GetTick();
+            set_output_neutral();
+        }
+        taskEXIT_CRITICAL();
+        return;
+    }
+
+    const uint32_t now = HAL_GetTick();
+    if (command_valid &&
+        !body_command_is_zero(command) &&
+        (now - last_ms) > timeout_ms)
+    {
+        taskENTER_CRITICAL();
+        if (robot.body_command_valid &&
+            robot.body_command_source == source &&
+            robot.body_command_sequence == sequence &&
+            robot.body_command_last_ms == last_ms &&
+            robot.body_command_timeout_ms == timeout_ms &&
+            body_commands_equal(robot.body_command, command))
+        {
+            robot.control_enable = false;
+            robot.float_enabled = false;
+            robot.angle_enabled = false;
+            robot.body_control_enabled = false;
+            robot.last_neutral_reason = kNeutralReasonCommand;
+            robot.state = RobotState::ARMED_IDLE;
+            robot.state_changed_ms = now;
+            set_output_neutral();
+        }
+        taskEXIT_CRITICAL();
+        return;
+    }
+
+    const BodyCommand active_command =
+        command_valid ? command : BodyCommand{};
+
+    float mixed_output[8] = {0.0F};
+    int32_t pwm_output[8] = {
+        ROBOT_PWM_NEUTRAL_US, ROBOT_PWM_NEUTRAL_US,
+        ROBOT_PWM_NEUTRAL_US, ROBOT_PWM_NEUTRAL_US,
+        ROBOT_PWM_NEUTRAL_US, ROBOT_PWM_NEUTRAL_US,
+        ROBOT_PWM_NEUTRAL_US, ROBOT_PWM_NEUTRAL_US,
+    };
+    bool horizontal_saturated = false;
+    bool vertical_saturated = false;
+    if (!calculate_body_outputs(active_command, float_enabled, angle_enabled,
+                                tuning, mixed_output, pwm_output,
+                                horizontal_saturated, vertical_saturated))
+    {
+        taskENTER_CRITICAL();
+        robot.last_neutral_reason = kNeutralReasonCommand;
+        robot.control_enable = false;
+        robot.float_enabled = false;
+        robot.angle_enabled = false;
+        robot.body_control_enabled = false;
+        robot.state = RobotState::ARMED_IDLE;
+        robot.state_changed_ms = HAL_GetTick();
         set_output_neutral();
         taskEXIT_CRITICAL();
+        return;
     }
+
+    taskENTER_CRITICAL();
+    const bool safe_state =
+        robot.state == RobotState::ARMED_ACTIVE &&
+        !robot.estop_locked &&
+        robot.control_enable &&
+        (robot.body_control_enabled ||
+         robot.float_enabled ||
+         robot.angle_enabled);
+    const bool command_unchanged =
+        robot.body_command_valid == command_valid &&
+        (!command_valid ||
+         (robot.body_command_source == source &&
+          robot.body_command_sequence == sequence &&
+          robot.body_command_last_ms == last_ms &&
+          robot.body_command_timeout_ms == timeout_ms &&
+          body_commands_equal(robot.body_command, command))) &&
+        robot.body_control_enabled == body_control_enabled &&
+        robot.float_enabled == float_enabled &&
+        robot.angle_enabled == angle_enabled &&
+        robot.motion_tuning_generation == tuning_generation;
+
+    if (!safe_state)
+    {
+        set_output_neutral();
+    }
+    else if (!command_unchanged)
+    {
+        // A newer valid command arrived while the previous one was being
+        // calculated. Never publish the stale result; keep the new command
+        // valid so the next control cycle can calculate it.
+        neutralize_computed_output_locked(InitPWM_);
+    }
+    else
+    {
+        int32_t current_pwm[8];
+        int32_t slewed_pwm[8];
+        for (uint8_t channel = 0U; channel < 8U; ++channel)
+        {
+            current_pwm[channel] = robot.pwm[channel];
+        }
+        apply_pwm_slew(
+            pwm_output, current_pwm, tuning, now, slewed_pwm);
+        for (const auto &thruster : thruster_config::kThrusters)
+        {
+            const uint8_t channel = thruster.channel;
+            robot.mixed_output[channel] = mixed_output[channel];
+            robot.pwm[channel] = slewed_pwm[channel];
+        }
+        robot.horizontal_saturated = horizontal_saturated;
+        robot.vertical_saturated = vertical_saturated;
+        mark_pwm_output_updated(robot);
+    }
+    taskEXIT_CRITICAL();
 }

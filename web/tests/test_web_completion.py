@@ -24,7 +24,8 @@ from opi_console.main import (
 from opi_console.serial_transport import SerialTransport
 from opi_console.simulated_stm32 import SimulatedStm32
 from opi_console.stm32_proxy import Stm32Proxy
-from protocol import MsgType, SafetyState, encode_frame
+from protocol import MsgType, SafetyState, MotionTuning, encode_frame
+from opi_console.motion_tuning import MotionTuningStore
 from web_backend.app import create_app
 from web_backend.control_state import ControlState
 from web_backend.motor_mapping import load_mapping, save_mapping
@@ -434,6 +435,136 @@ def test_capabilities_are_complete_and_come_from_validated_config():
     run(scenario())
 
 
+def test_motion_tuning_persists_and_six_axis_hold_path_is_safe(tmp_path):
+    async def scenario():
+        tuning_file = tmp_path / "config" / "motion_tuning.json"
+        config = AppConfig.model_validate({
+            "motion_tuning": {"file": str(tuning_file)},
+            "telemetry": {
+                "status_hz": 20,
+                "sensors_hz": 5,
+                "request_timeout_s": 0.2,
+            },
+        })
+        client, _app, transport, proxy, sim = await make_stack(config=config)
+        payload = {
+            "axis_gain": [1.0, 0.9, 0.8, 0.7, 0.6, 0.5],
+            "axis_max_output": [0.3, 0.25, 0.2, 0.15, 0.1, 0.1],
+            "global_multiplier": 0.8,
+            "pwm_slew_rate_us_per_s": 2000,
+            "command_timeout_ms": 500,
+        }
+        try:
+            assert (await client.post("/api/arm")).status_code == 200
+            saved = await client.post("/api/motion/tuning", json=payload)
+            assert saved.status_code == 200, saved.text
+            assert saved.json()["synced"] is True
+            persisted = MotionTuningStore(tuning_file).load()
+            assert persisted.axis_gain == payload["axis_gain"]
+            assert persisted.axis_max_output == payload["axis_max_output"]
+            assert persisted.global_multiplier == payload["global_multiplier"]
+
+            enabled = await client.post("/api/motion/enable")
+            assert enabled.status_code == 200, enabled.text
+            assert sim.safety_state == SafetyState.ARMED_ACTIVE
+            assert sim.body_control_enabled is True
+
+            command = await client.post(
+                "/api/motion/command",
+                json={
+                    "surge": 1.0,
+                    "sway": 0.0,
+                    "heave": 0.0,
+                    "roll": 0.0,
+                    "pitch": 0.0,
+                    "yaw": 0.0,
+                },
+            )
+            assert command.status_code == 200, command.text
+            await asyncio.sleep(0.08)
+            report = await proxy.request_status()
+            assert report is not None
+            assert any(value != 1500 for value in report.pwm)
+            assert report.body_control_enabled is True
+
+            rejected = await client.post(
+                "/api/motion/tuning", json=payload)
+            assert rejected.status_code == 409
+
+            stopped = await client.post("/api/motion/stop")
+            assert stopped.status_code == 200, stopped.text
+            await asyncio.sleep(0.2)
+            report = await proxy.request_status()
+            assert report is not None
+            assert report.pwm == [1500] * 8
+            assert report.body_control_enabled is True
+
+            disabled = await client.post("/api/motion/disable")
+            assert disabled.status_code == 200, disabled.text
+            report = await proxy.request_status()
+            assert report is not None
+            assert report.safety_state == SafetyState.ARMED_IDLE
+            assert report.pwm == [1500] * 8
+            assert report.body_control_enabled is False
+
+            # A same-link STM32 reset restores firmware tuning defaults. The
+            # next enable must re-read and restore persisted Orange Pi values
+            # before motion becomes active.
+            await sim.restart()
+            await proxy.request_status()
+            assert sim.motion_tuning.axis_gain != payload["axis_gain"]
+            assert (await client.post("/api/arm")).status_code == 200
+            enabled = await client.post("/api/motion/enable")
+            assert enabled.status_code == 200, enabled.text
+            assert sim.motion_tuning.axis_gain == pytest.approx(
+                payload["axis_gain"])
+            assert sim.motion_tuning.axis_max_output == pytest.approx(
+                payload["axis_max_output"])
+            assert sim.motion_tuning.global_multiplier == pytest.approx(
+                payload["global_multiplier"])
+            assert (await client.post("/api/motion/disable")).status_code == 200
+            assert (await client.post("/api/disarm")).status_code == 200
+        finally:
+            await close_stack(client, transport)
+
+    run(scenario())
+
+
+def test_six_axis_nonzero_command_timeout_hard_neutralizes(tmp_path):
+    async def scenario():
+        config = AppConfig.model_validate({
+            "motion_tuning": {
+                "file": str(tmp_path / "motion_tuning.json"),
+            },
+            "telemetry": {
+                "status_hz": 20,
+                "request_timeout_s": 0.2,
+            },
+        })
+        client, _app, transport, proxy, sim = await make_stack(config=config)
+        tuning = MotionTuning(command_timeout_ms=200)
+        try:
+            assert (await client.post("/api/arm")).status_code == 200
+            assert await proxy.set_motion_tuning(tuning)
+            assert (await client.post("/api/motion/enable")).status_code == 200
+            response = await client.post(
+                "/api/motion/command",
+                json={"surge": 1.0},
+            )
+            assert response.status_code == 200
+            await asyncio.sleep(0.26)
+            report = await proxy.request_status()
+            assert report is not None
+            assert report.safety_state == SafetyState.ARMED_IDLE
+            assert report.body_control_enabled is False
+            assert report.pwm == [1500] * 8
+            assert sim.body_control_enabled is False
+        finally:
+            await close_stack(client, transport)
+
+    run(scenario())
+
+
 def test_invalid_or_missing_config_fails_before_service_start(tmp_path):
     missing = tmp_path / "missing.yaml"
     with pytest.raises(ValueError, match="does not exist"):
@@ -771,7 +902,7 @@ def test_motor_mapping_api_validates_and_persists_atomically(tmp_path):
                 {"mappings": [{**valid["mappings"][0], "channel": 8}]},
                 {"mappings": [{**valid["mappings"][0], "neutral_us": 1490}]},
                 {"mappings": [{**valid["mappings"][0], "safe_min_us": 1510}]},
-                {"mappings": [{**valid["mappings"][0], "safe_min_us": 1200}]},
+                {"mappings": [{**valid["mappings"][0], "safe_min_us": 999}]},
             ]
             for payload in invalid_payloads:
                 rejected = await client.post("/api/motor-mapping", json=payload)
@@ -787,6 +918,9 @@ def test_corrupted_mapping_file_fails_closed_to_safe_defaults(tmp_path):
     mapping_file.write_text("{not-json", encoding="utf-8")
     data = load_mapping(mapping_file)
     assert len(data["mappings"]) == 8
+    assert [item["physical_name"] for item in data["mappings"]] == [
+        f"CH{channel}" for channel in range(8)
+    ]
     assert all(item["neutral_us"] == 1500 for item in data["mappings"])
 
     mapping_file.write_text(

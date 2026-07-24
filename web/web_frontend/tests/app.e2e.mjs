@@ -191,6 +191,42 @@ try {
 
   await page.getByRole('button', { name: '上锁并回中' }).click();
   await page.getByText('未解锁', { exact: true }).first().waitFor();
+
+  await page.getByRole('button', { name: '运动调参', exact: true }).click();
+  await page.getByRole('heading', { name: '运动调参' }).waitFor();
+  await page.getByRole('button', { name: '解锁' }).click();
+  await page.getByText('已解锁待机', { exact: true }).first().waitFor();
+  await page.getByRole('button', { name: '进入六轴控制' }).click();
+  await page.getByText('六轴模式已开启', { exact: true }).waitFor();
+
+  const motionCommandResponse = page.waitForResponse(response => (
+    response.url().endsWith('/api/motion/command')
+    && response.request().method() === 'POST'
+  ));
+  const motionStopResponse = page.waitForResponse(response => (
+    response.url().endsWith('/api/motion/stop')
+    && response.request().method() === 'POST'
+  ));
+  const forwardButton = page.getByRole('button', { name: /前进/ });
+  await forwardButton.hover();
+  await page.mouse.down();
+  await delay(180);
+  assert.equal((await motionCommandResponse).status(), 200);
+  await page.mouse.up();
+  assert.equal((await motionStopResponse).status(), 200);
+
+  await waitFor(async () => {
+    const response = await fetch(`${baseUrl}/api/status`);
+    if (!response.ok) return false;
+    const current = await response.json();
+    return current.body_control_enabled
+      && current.confirmed_pwm.every(value => value === 1500);
+  }, 3000);
+  await page.getByRole('button', { name: '停止并退出' }).click();
+  await page.getByText('已解锁待机', { exact: true }).first().waitFor();
+  await page.getByRole('button', { name: '上锁并回中' }).click();
+  await page.getByText('未解锁', { exact: true }).first().waitFor();
+
   await stopBackend();
   await page.getByText('WebSocket 断开', { exact: true }).waitFor({ timeout: 8000 });
   await page.getByText('WebSocket 已断开，页面离线，所有控制已锁定', {
@@ -228,6 +264,7 @@ try {
   await page.getByRole('button', { name: '解除急停' }).click();
   await page.getByText('未解锁', { exact: true }).first().waitFor();
 
+  await page.getByRole('button', { name: '状态与 PWM', exact: true }).click();
   await page.getByRole('button', { name: '解锁' }).click();
   await page.getByText('已解锁待机', { exact: true }).first().waitFor();
   await page.getByRole('button', { name: '进入手动测试' }).click();

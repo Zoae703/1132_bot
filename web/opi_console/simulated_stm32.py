@@ -22,12 +22,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "protocol", "sh
 from protocol import (
     MAGIC_0, FRAME_OVERHEAD, MAX_PAYLOAD, CRC_SIZE,
     PROTO_BUF_SIZE, MsgType, SafetyState, NackReason, NeutralReason,
-    SetPwm, StatusReport, SensorReport, ProtoAck, ProtoNack,
+    SetPwm, SetBodyCommand, MotionTuning, StatusReport, SensorReport,
+    ProtoAck, ProtoNack,
     SafetyEvent, Heartbeat, HeartbeatAck,
     encode_frame, decode_frame, find_frame_start,
 )
+from opi_console.motion_tuning import validate_motion_tuning
 
 logger = logging.getLogger("opi_console.simulator")
+
+_AXIS_DIRECTIONS = (
+    (-1, -1, 0, 0, 0, 1),
+    (0, 0, 1, 1, 1, 0),
+    (0, 0, 1, 1, -1, 0),
+    (-1, 1, 0, 0, 0, 1),
+    (1, 1, 0, 0, 0, 1),
+    (0, 0, -1, 1, 1, 0),
+    (0, 0, -1, 1, -1, 0),
+    (1, -1, 0, 0, 0, 1),
+)
+_HORIZONTAL_CHANNELS = frozenset((0, 3, 4, 7))
+_NEUTRAL_TRIM_US = (0, 0, -100, 0, 0, 90, 0, 0)
+_DEADZONE_US = (50, 50, 50, 50, 50, 50, 50, 50)
 
 
 # ============================================================================
@@ -157,6 +173,7 @@ class SimulatedStm32:
         self.control_enable: bool = False
         self.float_enabled: bool = False
         self.angle_enabled: bool = False
+        self.body_control_enabled: bool = False
         self.estop_locked: bool = False
         self.active_channel: int = -1  # -1 = none
         self.channel_deadline: float = 0.0
@@ -164,6 +181,12 @@ class SimulatedStm32:
         self.neutral_reason: NeutralReason = NeutralReason.NONE
         self.heartbeat_missed: int = 0
         self.pwm: List[int] = [self._pwm_neutral] * 8
+        self._desired_body_pwm: List[int] = [self._pwm_neutral] * 8
+        self.body_command = SetBodyCommand()
+        self.body_command_last_at: float = 0.0
+        self.motion_tuning = MotionTuning()
+        self.horizontal_saturated: bool = False
+        self.vertical_saturated: bool = False
         self.seq: int = 0
         self.error_count: int = 0
         self.uptime_s: int = 0
@@ -220,12 +243,19 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
         self.estop_locked = False
         self.active_channel = -1
         self.channel_deadline = 0.0
         self.last_heartbeat = now
         self.heartbeat_missed = 0
         self.pwm = [self._pwm_neutral] * 8
+        self._desired_body_pwm = [self._pwm_neutral] * 8
+        self.body_command = SetBodyCommand()
+        self.body_command_last_at = 0.0
+        self.motion_tuning = MotionTuning()
+        self.horizontal_saturated = False
+        self.vertical_saturated = False
         self.neutral_reason = NeutralReason.NONE
         self.seq = 0
         self.error_count = 0
@@ -332,6 +362,22 @@ class SimulatedStm32:
         if self.active_channel >= 0 and now >= self.channel_deadline:
             await self._cancel_channel_test()
 
+        if self.body_control_enabled:
+            nonzero = any(value != 0.0 for value in self.body_command.values())
+            timeout_s = self.motion_tuning.command_timeout_ms / 1000.0
+            if (
+                nonzero
+                and self.body_command_last_at > 0.0
+                and (now - self.body_command_last_at) > timeout_s
+            ):
+                self.body_control_enabled = False
+                self.control_enable = False
+                self.safety_state = SafetyState.ARMED_IDLE
+                self.body_command = SetBodyCommand()
+                self._all_neutral(NeutralReason.COMMAND)
+            else:
+                self._apply_body_slew(dt_s)
+
         if self._status_report_interval and now >= self._next_status_report:
             self._next_status_report = now + self._status_report_interval
             await self._send_status_report()
@@ -407,8 +453,13 @@ class SimulatedStm32:
             MsgType.EXIT_MANUAL: self._h_exit_manual,
             MsgType.SET_PWM: self._h_set_pwm,
             MsgType.SET_ALL_NEUTRAL: self._h_set_all_neutral,
+            MsgType.SET_BODY_COMMAND: self._h_set_body_command,
+            MsgType.BODY_CONTROL_ON: self._h_body_control_on,
+            MsgType.BODY_CONTROL_OFF: self._h_body_control_off,
+            MsgType.SET_MOTION_TUNING: self._h_set_motion_tuning,
             MsgType.REQUEST_STATUS: self._h_request_status,
             MsgType.REQUEST_SENSORS: self._h_request_sensors,
+            MsgType.REQUEST_MOTION_TUNING: self._h_request_motion_tuning,
         }
         handler = handlers.get(msg_type)
         if handler is None:
@@ -425,11 +476,29 @@ class SimulatedStm32:
             MsgType.EXIT_MANUAL: 0,
             MsgType.SET_PWM: 6,
             MsgType.SET_ALL_NEUTRAL: 0,
+            MsgType.SET_BODY_COMMAND: 24,
+            MsgType.BODY_CONTROL_ON: 0,
+            MsgType.BODY_CONTROL_OFF: 0,
+            MsgType.SET_MOTION_TUNING: 56,
             MsgType.REQUEST_STATUS: 0,
             MsgType.REQUEST_SENSORS: 0,
+            MsgType.REQUEST_MOTION_TUNING: 0,
         }
         if len(payload) != expected_lengths[msg_type]:
             self.error_count += 1
+            if msg_type == MsgType.SET_BODY_COMMAND:
+                self.body_control_enabled = False
+                self.control_enable = False
+                self.body_command = SetBodyCommand()
+                self.body_command_last_at = 0.0
+                if (
+                    not self.estop_locked
+                    and self.safety_state == SafetyState.ARMED_ACTIVE
+                ):
+                    self.safety_state = SafetyState.ARMED_IDLE
+                self._all_neutral(
+                    NeutralReason.EMERGENCY_STOP
+                    if self.estop_locked else NeutralReason.COMMAND)
             await self._send_nack(
                 seq, msg_type, NackReason.INVALID_PAYLOAD_LENGTH)
             return
@@ -445,6 +514,7 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
         self.heartbeat_missed += 1
         self._all_neutral(NeutralReason.COMM_LOST)
         await self._send_status_report(high_priority=True)
@@ -463,8 +533,11 @@ class SimulatedStm32:
     def _all_neutral(self, reason: NeutralReason = NeutralReason.COMMAND):
         for i in range(8):
             self.pwm[i] = self._pwm_neutral
+            self._desired_body_pwm[i] = self._pwm_neutral
         self.active_channel = -1
         self.channel_deadline = 0.0
+        self.horizontal_saturated = False
+        self.vertical_saturated = False
         self.neutral_reason = reason
 
     async def _send_frame(self, msg_type: int, payload: bytes = b"",
@@ -519,6 +592,93 @@ class SimulatedStm32:
                          original_type=original_type, reason=reason)
         await self._send_frame(MsgType.NACK, nack.pack(), high_priority=True)
 
+    def _calculate_body_pwm(self, command: SetBodyCommand) -> List[int]:
+        axes = command.values()
+        limited_axes = []
+        axis_limited = [False] * 6
+        for index, value in enumerate(axes):
+            scaled = value * self.motion_tuning.axis_gain[index]
+            limited = max(
+                -self.motion_tuning.axis_max_output[index],
+                min(self.motion_tuning.axis_max_output[index], scaled),
+            )
+            axis_limited[index] = limited != scaled
+            limited_axes.append(
+                limited * self.motion_tuning.global_multiplier)
+
+        if all(value == 0.0 for value in limited_axes):
+            self.horizontal_saturated = any(
+                axis_limited[index] for index in (0, 1, 5))
+            self.vertical_saturated = any(
+                axis_limited[index] for index in (2, 3, 4))
+            return [self._pwm_neutral] * 8
+
+        raw = [
+            sum(
+                direction * limited_axes[axis]
+                for axis, direction in enumerate(_AXIS_DIRECTIONS[channel])
+            )
+            for channel in range(8)
+        ]
+        horizontal_max = max(
+            abs(raw[channel]) for channel in _HORIZONTAL_CHANNELS)
+        vertical_max = max(
+            abs(raw[channel])
+            for channel in range(8)
+            if channel not in _HORIZONTAL_CHANNELS
+        )
+        horizontal_group_limited = horizontal_max > 1.0
+        vertical_group_limited = vertical_max > 1.0
+        horizontal_scale = (
+            1.0 / horizontal_max if horizontal_group_limited else 1.0)
+        vertical_scale = (
+            1.0 / vertical_max if vertical_group_limited else 1.0)
+        self.horizontal_saturated = (
+            horizontal_group_limited
+            or any(axis_limited[index] for index in (0, 1, 5))
+        )
+        self.vertical_saturated = (
+            vertical_group_limited
+            or any(axis_limited[index] for index in (2, 3, 4))
+        )
+
+        output: List[int] = []
+        for channel in range(8):
+            horizontal = channel in _HORIZONTAL_CHANNELS
+            normalized = raw[channel] * (
+                horizontal_scale if horizontal else vertical_scale)
+            span = 450.0 if horizontal else 350.0
+            delta_float = normalized * span
+            delta = (
+                math.floor(delta_float + 0.5)
+                if delta_float >= 0.0
+                else math.ceil(delta_float - 0.5)
+            )
+            pwm = self._pwm_neutral
+            if delta != 0:
+                pwm += _NEUTRAL_TRIM_US[channel] + delta
+                if pwm > self._pwm_neutral:
+                    pwm += _DEADZONE_US[channel]
+                elif pwm < self._pwm_neutral:
+                    pwm -= _DEADZONE_US[channel]
+            output.append(max(1000, min(2000, pwm)))
+        return output
+
+    def _apply_body_slew(self, dt_s: float):
+        max_step = max(
+            1,
+            math.ceil(
+                self.motion_tuning.pwm_slew_rate_us_per_s
+                * max(0.0, min(dt_s, 0.1))
+            ),
+        )
+        for channel, desired in enumerate(self._desired_body_pwm):
+            current = self.pwm[channel]
+            if desired > current:
+                self.pwm[channel] = min(desired, current + max_step)
+            elif desired < current:
+                self.pwm[channel] = max(desired, current - max_step)
+
     # -------- Command handlers --------
 
     async def _h_heartbeat(self, seq: int, payload: bytes):
@@ -537,6 +697,7 @@ class SimulatedStm32:
             self.control_enable = False
             self.float_enabled = False
             self.angle_enabled = False
+            self.body_control_enabled = False
             self._all_neutral(NeutralReason.COMM_LOST)
 
         # Send heartbeat ACK
@@ -556,6 +717,7 @@ class SimulatedStm32:
             self.control_enable = False
             self.float_enabled = False
             self.angle_enabled = False
+            self.body_control_enabled = False
             self._all_neutral(NeutralReason.NONE)
             await self._send_ack(seq)
             logger.info("Simulator: ARMED_IDLE")
@@ -566,6 +728,7 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
         if self.estop_locked:
             self.safety_state = SafetyState.EMERGENCY_STOP
             self._all_neutral(NeutralReason.EMERGENCY_STOP)
@@ -580,6 +743,7 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
         self.estop_locked = True
         self._all_neutral(NeutralReason.EMERGENCY_STOP)
         await self._send_ack(seq)
@@ -594,6 +758,7 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
         self._all_neutral(NeutralReason.DISARM)
         await self._send_ack(seq)
         logger.info("Simulator: ESTOP reset → DISARMED")
@@ -606,6 +771,7 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
         self._all_neutral(NeutralReason.COMMAND)
         await self._send_ack(seq)
         logger.info("Simulator: MANUAL_TEST")
@@ -618,6 +784,7 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
         self._all_neutral(NeutralReason.COMMAND)
         await self._send_ack(seq)
 
@@ -671,6 +838,9 @@ class SimulatedStm32:
         self.control_enable = False
         self.float_enabled = False
         self.angle_enabled = False
+        self.body_control_enabled = False
+        self.body_command = SetBodyCommand()
+        self.body_command_last_at = 0.0
         self._all_neutral(
             NeutralReason.EMERGENCY_STOP
             if self.estop_locked else NeutralReason.COMMAND)
@@ -679,6 +849,121 @@ class SimulatedStm32:
                     SafetyState.MANUAL_TEST, SafetyState.ARMED_ACTIVE)):
             self.safety_state = SafetyState.ARMED_IDLE
         await self._send_ack(seq)
+
+    async def _h_body_control_on(self, seq: int, payload: bytes):
+        if (
+            self.estop_locked
+            or self.safety_state != SafetyState.ARMED_IDLE
+        ):
+            reason = (
+                NackReason.ESTOP_LOCKED
+                if self.estop_locked
+                else NackReason.BAD_STATE
+            )
+            await self._send_nack(seq, MsgType.BODY_CONTROL_ON, reason)
+            return
+        self.safety_state = SafetyState.ARMED_ACTIVE
+        self.control_enable = True
+        self.float_enabled = False
+        self.angle_enabled = False
+        self.body_control_enabled = True
+        self.body_command = SetBodyCommand()
+        self.body_command_last_at = time.monotonic()
+        self._all_neutral(NeutralReason.NONE)
+        await self._send_ack(seq)
+
+    async def _h_body_control_off(self, seq: int, payload: bytes):
+        if (
+            self.safety_state != SafetyState.ARMED_ACTIVE
+            or not self.body_control_enabled
+        ):
+            await self._send_nack(
+                seq, MsgType.BODY_CONTROL_OFF, NackReason.BAD_STATE)
+            return
+        self.body_control_enabled = False
+        self.control_enable = False
+        self.float_enabled = False
+        self.angle_enabled = False
+        self.safety_state = SafetyState.ARMED_IDLE
+        self.body_command = SetBodyCommand()
+        self.body_command_last_at = 0.0
+        self._all_neutral(NeutralReason.COMMAND)
+        await self._send_ack(seq)
+
+    async def _h_set_body_command(self, seq: int, payload: bytes):
+        try:
+            command = SetBodyCommand.unpack(payload)
+        except struct.error:
+            await self._send_nack(
+                seq, MsgType.SET_BODY_COMMAND,
+                NackReason.INVALID_PAYLOAD_LENGTH)
+            return
+        if (
+            self.safety_state != SafetyState.ARMED_ACTIVE
+            or not self.body_control_enabled
+            or not self.control_enable
+            or self.estop_locked
+        ):
+            self.body_control_enabled = False
+            self.control_enable = False
+            if (
+                not self.estop_locked
+                and self.safety_state == SafetyState.ARMED_ACTIVE
+            ):
+                self.safety_state = SafetyState.ARMED_IDLE
+            self._all_neutral(
+                NeutralReason.EMERGENCY_STOP
+                if self.estop_locked
+                else NeutralReason.COMMAND)
+            await self._send_nack(
+                seq, MsgType.SET_BODY_COMMAND, NackReason.BAD_STATE)
+            return
+        if any(
+            not math.isfinite(value) or value < -1.0 or value > 1.0
+            for value in command.values()
+        ):
+            self.body_control_enabled = False
+            self.control_enable = False
+            self.safety_state = SafetyState.ARMED_IDLE
+            self.body_command = SetBodyCommand()
+            self._all_neutral(NeutralReason.COMMAND)
+            await self._send_nack(
+                seq, MsgType.SET_BODY_COMMAND, NackReason.INVALID_VALUE)
+            return
+        self.body_command = command
+        self.body_command_last_at = time.monotonic()
+        self._desired_body_pwm = self._calculate_body_pwm(command)
+        self.neutral_reason = NeutralReason.NONE
+        await self._send_ack(seq)
+
+    async def _h_set_motion_tuning(self, seq: int, payload: bytes):
+        try:
+            tuning = MotionTuning.unpack(payload)
+            validate_motion_tuning(tuning)
+        except (struct.error, ValueError, OverflowError):
+            await self._send_nack(
+                seq, MsgType.SET_MOTION_TUNING, NackReason.INVALID_VALUE)
+            return
+        if self.estop_locked:
+            await self._send_nack(
+                seq, MsgType.SET_MOTION_TUNING, NackReason.ESTOP_LOCKED)
+            return
+        if self.safety_state not in (
+            SafetyState.DISARMED,
+            SafetyState.ARMED_IDLE,
+        ):
+            await self._send_nack(
+                seq, MsgType.SET_MOTION_TUNING, NackReason.BAD_STATE)
+            return
+        self.motion_tuning = tuning
+        await self._send_ack(seq)
+
+    async def _h_request_motion_tuning(self, seq: int, payload: bytes):
+        await self._send_frame(
+            MsgType.MOTION_TUNING_REPORT,
+            self.motion_tuning.pack(),
+            high_priority=True,
+        )
 
     async def _h_request_status(self, seq: int, payload: bytes):
         await self._send_status_report(high_priority=True)
@@ -708,6 +993,12 @@ class SimulatedStm32:
             flags |= 0x08  # manual_pwm_enabled
         if self.estop_locked:
             flags |= 0x10
+        if self.body_control_enabled:
+            flags |= 0x20
+        if self.horizontal_saturated:
+            flags |= 0x40
+        if self.vertical_saturated:
+            flags |= 0x80
         return flags
 
     async def _h_request_sensors(self, seq: int, payload: bytes):

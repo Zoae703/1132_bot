@@ -122,11 +122,11 @@ def save_mapping(mappings: List[Dict[str, Any]], path: str | Path):
 
 def _default_mappings(channel_count: int, neutral_us: int,
                       safe_min_us: int, safe_max_us: int) -> List[Dict[str, Any]]:
-    """Default (empty) motor mapping for 8 channels."""
+    """Default channel-only mapping; physical truth lives in firmware config."""
     return [
         {
             "channel": ch,
-            "physical_name": f"Motor {ch}",
+            "physical_name": f"CH{ch}",
             "direction": "",
             "reversed": False,
             "neutral_us": neutral_us,

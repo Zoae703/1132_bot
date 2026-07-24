@@ -54,10 +54,16 @@ class MsgType(IntEnum):
     SET_DEPTH = 0x34
     SET_YAW = 0x35
     SET_MOTION = 0x36
+    SET_BODY_COMMAND = 0x37
+    BODY_CONTROL_ON = 0x38
+    BODY_CONTROL_OFF = 0x39
+    SET_MOTION_TUNING = 0x3A
     REQUEST_STATUS = 0x40
     REQUEST_SENSORS = 0x41
+    REQUEST_MOTION_TUNING = 0x42
     STATUS_REPORT = 0x80
     SENSOR_REPORT = 0x81
+    MOTION_TUNING_REPORT = 0x82
     LOG_MESSAGE = 0x90
     SAFETY_EVENT = 0x91
     HEARTBEAT = 0xF0
@@ -220,6 +226,78 @@ class SetMotion:
 
 
 @dataclass
+class SetBodyCommand:
+    """SET_BODY_COMMAND payload; all axes are normalized to [-1, +1]."""
+    surge: float = 0.0
+    sway: float = 0.0
+    heave: float = 0.0
+    roll: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+
+    _fmt: str = field(default="<6f", repr=False, init=False)
+
+    def values(self) -> List[float]:
+        return [
+            self.surge, self.sway, self.heave,
+            self.roll, self.pitch, self.yaw,
+        ]
+
+    def pack(self) -> bytes:
+        return struct.pack(self._fmt, *self.values())
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "SetBodyCommand":
+        return cls(*struct.unpack(cls._fmt, data))
+
+
+@dataclass
+class MotionTuning:
+    """SET_MOTION_TUNING / MOTION_TUNING_REPORT payload."""
+    axis_gain: List[float] = field(
+        default_factory=lambda: [1.0] * 6)
+    axis_max_output: List[float] = field(
+        default_factory=lambda: [0.20, 0.20, 0.20, 0.10, 0.10, 0.10])
+    global_multiplier: float = 1.0
+    pwm_slew_rate_us_per_s: int = 1000
+    command_timeout_ms: int = 500
+
+    _fmt: str = field(default="<13fHH", repr=False, init=False)
+
+    def pack(self) -> bytes:
+        if len(self.axis_gain) != 6 or len(self.axis_max_output) != 6:
+            raise ValueError("motion tuning requires exactly six axes")
+        return struct.pack(
+            self._fmt,
+            *self.axis_gain,
+            *self.axis_max_output,
+            self.global_multiplier,
+            self.pwm_slew_rate_us_per_s,
+            self.command_timeout_ms,
+        )
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "MotionTuning":
+        values = struct.unpack(cls._fmt, data)
+        return cls(
+            axis_gain=list(values[0:6]),
+            axis_max_output=list(values[6:12]),
+            global_multiplier=values[12],
+            pwm_slew_rate_us_per_s=values[13],
+            command_timeout_ms=values[14],
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "axis_gain": list(self.axis_gain),
+            "axis_max_output": list(self.axis_max_output),
+            "global_multiplier": self.global_multiplier,
+            "pwm_slew_rate_us_per_s": self.pwm_slew_rate_us_per_s,
+            "command_timeout_ms": self.command_timeout_ms,
+        }
+
+
+@dataclass
 class StatusReport:
     """STATUS_REPORT payload (24 bytes)."""
     safety_state: int = 0
@@ -251,6 +329,18 @@ class StatusReport:
     @property
     def estop_locked(self) -> bool:
         return bool(self.flags & 0x10)
+
+    @property
+    def body_control_enabled(self) -> bool:
+        return bool(self.flags & 0x20)
+
+    @property
+    def horizontal_saturated(self) -> bool:
+        return bool(self.flags & 0x40)
+
+    @property
+    def vertical_saturated(self) -> bool:
+        return bool(self.flags & 0x80)
 
     def pack(self) -> bytes:
         return struct.pack(self._fmt, self.safety_state & 0xFF, self.flags & 0xFF,
@@ -403,8 +493,11 @@ _PAYLOAD_CLASSES = {
     MsgType.SET_DEPTH: SetDepth,
     MsgType.SET_YAW: SetYaw,
     MsgType.SET_MOTION: SetMotion,
+    MsgType.SET_BODY_COMMAND: SetBodyCommand,
+    MsgType.SET_MOTION_TUNING: MotionTuning,
     MsgType.STATUS_REPORT: StatusReport,
     MsgType.SENSOR_REPORT: SensorReport,
+    MsgType.MOTION_TUNING_REPORT: MotionTuning,
     MsgType.ACK: ProtoAck,
     MsgType.NACK: ProtoNack,
     MsgType.SAFETY_EVENT: SafetyEvent,

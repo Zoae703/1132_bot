@@ -18,10 +18,10 @@ reconnect:
 pwm:
   channel_count: 8
   neutral_us: 1500
-  min_test_us: 1450
-  max_test_us: 1550
-  min_absolute_us: 1300
-  max_absolute_us: 1700
+  min_test_us: 1000
+  max_test_us: 2000
+  min_absolute_us: 1000
+  max_absolute_us: 2000
   min_test_duration_ms: 200
   max_test_duration_ms: 2000
   default_timeout_ms: 500
@@ -59,11 +59,16 @@ simulation:
 features:
   manual_pwm: true
   motor_mapping: true
+  motion_tuning: true
   sensor_stream: true
   emergency_stop: true
 
 motor_mapping:
   file: config/motor_mapping.json
+
+motion_tuning:
+  file: config/motion_tuning.json
+  sync_interval_s: 0.5
 
 safety:
   disconnect_command_timeout_s: 1.5

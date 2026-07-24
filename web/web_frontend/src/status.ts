@@ -31,6 +31,12 @@ export interface RobotStatus {
   float_enabled: boolean;
   angle_enabled: boolean;
   manual_pwm_enabled: boolean;
+  body_control_enabled: boolean;
+  horizontal_saturated: boolean;
+  vertical_saturated: boolean;
+  motion_tuning_synced: boolean;
+  motion_tuning_sync_state: string;
+  motion_tuning_sync_error: string | null;
   estop_locked: boolean;
   backend_motion_inhibited: boolean;
   backend_motion_inhibit_reason: string | null;
@@ -139,6 +145,14 @@ export function normalizeStatus(raw: unknown): RobotStatus {
     float_enabled: asBool(source.float_enabled),
     angle_enabled: asBool(source.angle_enabled),
     manual_pwm_enabled: asBool(source.manual_pwm_enabled),
+    body_control_enabled: asBool(source.body_control_enabled),
+    horizontal_saturated: asBool(source.horizontal_saturated),
+    vertical_saturated: asBool(source.vertical_saturated),
+    motion_tuning_synced: asBool(source.motion_tuning_synced),
+    motion_tuning_sync_state: asOptionalString(
+      source.motion_tuning_sync_state) ?? 'pending',
+    motion_tuning_sync_error: asOptionalString(
+      source.motion_tuning_sync_error),
     // Missing emergency-stop state is unsafe: keep motion controls locked.
     estop_locked: safetyState === 5 || asBool(source.estop_locked, true),
     backend_motion_inhibited: asBool(source.backend_motion_inhibited, true),

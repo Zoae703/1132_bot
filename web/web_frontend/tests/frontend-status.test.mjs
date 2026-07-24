@@ -22,9 +22,28 @@ test('normalizeStatus uses fail-safe defaults for missing dangerous fields', () 
   assert.equal(status.status_stale, true);
   assert.equal(status.sensors_stale, true);
   assert.equal(status.estop_locked, true);
+  assert.equal(status.body_control_enabled, false);
+  assert.equal(status.motion_tuning_synced, false);
   assert.deepEqual(status.confirmed_pwm, []);
   assert.deepEqual(status.requested_pwm, []);
   assert.equal(Number.isNaN(status.depth_m), true);
+});
+
+test('normalizeStatus exposes six-axis and saturation state', () => {
+  const status = normalizeStatus({
+    safety_state: 2,
+    estop_locked: false,
+    body_control_enabled: true,
+    horizontal_saturated: true,
+    vertical_saturated: false,
+    motion_tuning_synced: true,
+    motion_tuning_sync_state: 'synced',
+  });
+  assert.equal(status.body_control_enabled, true);
+  assert.equal(status.horizontal_saturated, true);
+  assert.equal(status.vertical_saturated, false);
+  assert.equal(status.motion_tuning_synced, true);
+  assert.equal(status.motion_tuning_sync_state, 'synced');
 });
 
 test('normalizeStatus keeps requested and confirmed PWM distinct', () => {

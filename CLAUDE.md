@@ -632,19 +632,24 @@ The Receive() logic is the main port — copy `Propeller_I2C::Receive()` from re
 
 ### MODULE 6: MotorControl (THE CORE)
 
-**Goal**: 8-motor PID cascade + thrust allocation. Reads sensors/AHRS/targets, writes 8 PWM values.
+**Goal**: 8-channel thruster PID cascade + force allocation. Reads sensors/AHRS/targets, writes 8 physical-channel PWM values.
 
 Port from reference: `Propeller.cpp` + `Propeller.h`
 
 **This is the largest module.** The reference code is at:
 `C:\Users\40713\Desktop\1132\origin_bot\rov-xy\FinsROV-An-Underwater-Camera-Based-Multi-Robot-Platform-main\Code\Lower_Level_Controller\userCode\devices\Src\Propeller.cpp`
 
-**Motor layout** (keep from reference):
-- 4 vertical (inner): PCA9685 channels 1,2,6,5 — heave, roll, pitch
-- 4 horizontal (outer): PCA9685 channels 0,3,7,4 — surge, sway, yaw
-- Sign array: `{1, -1, 1, 1, -1, -1, 1, -1}` (clockwise=1, counter-clockwise=-1)
-- Neutral: 1610µs
-- Dead-zone compensation: 50µs per motor
+**Thruster layout**:
+- The single source of truth is
+  `firmware/Modules/MotorControl/include/thruster_config.hpp`.
+- Physical PCA9685 channel 0-7 is the only identifier; there is no secondary
+  logical motor numbering.
+- Body coordinates are right-handed FRD: `+x=forward`, `+y=right`, `+z=down`.
+- `positive_force` is the body-frame force when PWM is above the 1500µs
+  neutral point. Propeller hand and rotation are descriptive metadata.
+- Vertical channels: 1, 2, 5, 6. Horizontal channels: 0, 3, 4, 7.
+- Existing calibration is attached to each physical channel: CH2 trim
+  `-100µs`, CH5 trim `+90µs`, and `50µs` dead-zone compensation per channel.
 
 **PID controllers** (7 total, from reference):
 
@@ -665,39 +670,12 @@ Port from reference: `Propeller.cpp` + `Propeller.h`
 4. Remove: 4-sensor averaging, TCA_SetChannel, ps_state gating
 5. The reference has `IMU::imu.attitude.neg_roll_v` for roll inner loop — check sign based on your IMU mounting orientation
 
-**vertical_PWM_allocation()** (adapted from reference lines 384-417):
-```cpp
-void MotorControl::vertical_allocation() {
-    if (!robot.float_enabled) return;
+**vertical_PWM_allocation()**:
 
-    float_ctrl();  // runs PID cascade, fills pwm_comp_
-
-    constexpr int8_t factors[4][3] = {
-        {-1, -1, -1},  // Motor 0 (InID[0]=ch1): front-left vertical
-        {-1, -1,  1},  // Motor 1 (InID[1]=ch2): rear-left vertical
-        {-1,  1, -1},  // Motor 2 (InID[2]=ch6): front-right vertical
-        {-1,  1,  1}   // Motor 3 (InID[3]=ch5): rear-right vertical
-    };
-
-    for (int i = 0; i < 4; i++) {
-        uint8_t idx = InID_[i];           // PCA9685 channel
-        int8_t sign = Sign_[idx];          // ±1 for propeller handedness
-        int32_t base = FloatPWM_[i];      // neutral + small trim
-        int32_t comp = Compensation_[idx]; // dead-zone
-
-        int32_t pwm = base - sign * (
-            pwm_comp_.depth * factors[i][0] +
-            pwm_comp_.roll  * factors[i][1] +
-            pwm_comp_.pitch * factors[i][2]
-        );
-
-        if (pwm > InitPWM_) pwm += comp;
-        else if (pwm < InitPWM_) pwm -= comp;
-
-        robot.pwm[idx] = pwm;
-    }
-}
-```
+Iterate the unified configuration, select `Orientation::Vertical`, and obtain
+heave/roll/pitch coefficients from `axis_direction()`. The torque components
+come from `position × positive_force`. Write the result directly to
+`robot.pwm[thruster.channel]`; never introduce an intermediate 0-3 slot.
 
 **float_ctrl()** (adapted from reference lines 336-356):
 ```cpp
@@ -726,36 +704,12 @@ void MotorControl::float_ctrl() {
 }
 ```
 
-**horizontal_PWM_allocation()** (adapted from reference lines 421-444):
-```cpp
-void MotorControl::horizontal_allocation() {
-    if (!robot.float_enabled) return;
+**horizontal_PWM_allocation()**:
 
-    float yaw_comp = 0;
-    if (robot.angle_enabled) {
-        angle_ctrl();
-        yaw_comp = pwm_comp_.yaw;
-    }
-
-    int state = robot.motion_state;
-    // state_PWM_map: pre-computed base PWMs for each motion direction
-    const auto& base = state_pwm_map_[state];
-
-    for (int i = 0; i < 4; i++) {
-        uint8_t idx = OutID_[i];
-        int32_t sign = Sign_[idx];
-        int32_t comp = Compensation_[idx];
-
-        // Front motors (i<2) and rear motors (i>=2) get opposite yaw
-        int32_t pwm = base[i] + ((i < 2) ? sign : -sign) * yaw_comp;
-
-        if (pwm > InitPWM_) pwm += comp;
-        else if (pwm < InitPWM_) pwm -= comp;
-
-        robot.pwm[idx] = pwm;
-    }
-}
-```
+Iterate the same configuration, select `Orientation::HorizontalDiagonal`, and
+obtain surge/sway/yaw coefficients from `axis_direction()`. Positive yaw in
+the FRD frame is clockwise when viewed from above. Discrete motion PWM and
+the truncated yaw PID correction are added before channel calibration.
 
 **angle_ctrl()** (adapted from reference lines 364-372):
 ```cpp
@@ -777,23 +731,12 @@ static float normalize_angle(float angle) {
 }
 ```
 
-**Motion state PWM tables** (copy from reference lines 26-66):
-```cpp
-// Defined as module-level constants (same values as reference)
-constexpr int32_t InitPWM = 1610;
-constexpr uint8_t longitudinal_speed = 80;
-constexpr uint8_t lateral_speed = 80;
-constexpr uint8_t rotate_speed = 40;
+**Motion state allocation**:
 
-// Sign, InID, OutID arrays
-constexpr int8_t  Sign[8]  = {1, -1, 1, 1, -1, -1, 1, -1};
-constexpr uint8_t InID[4]  = {1, 2, 6, 5};
-constexpr uint8_t OutID[4] = {0, 3, 7, 4};
-
-// FloatPWM (vertical neutral with small trim)
-// FrontPWM, BackPWM, LeftPWM, RightPWM, ClockwisePWM, AntiClockwisePWM, StopPWM
-// ALL copied verbatim from reference Propeller.cpp lines 26-66
-```
+MotorControl converts FRONT/BACK to signed surge, LEFT/RIGHT to signed sway,
+and CLOCKWISE/ANTICLOCKWISE to signed yaw. The configured force and torque
+directions convert those body commands to physical channel PWM. There are no
+per-motion four-slot PWM tables.
 
 **MotorControl::Update()** (main entry, called at 200Hz):
 ```cpp
@@ -804,7 +747,7 @@ void MotorControl::Update() {
         vertical_allocation();
         horizontal_allocation();
     } else {
-        // Float OFF: all motors at neutral
+        // Float OFF: all thrusters at neutral
         for (int i = 0; i < 8; i++)
             robot.pwm[i] = InitPWM_;
     }
@@ -813,9 +756,8 @@ void MotorControl::Update() {
 
 **MotorControl::Init()**:
 - Initialize all 7 PID controllers with reference gains
-- Copy Sign, InID, OutID, Compensation, FloatPWM arrays
-- Build state_PWM_map (Stop/Front/Back/Left/Right/Clockwise/Anticlockwise)
-- Set InitPWM_ = 1610
+- Use the compile-time validated unified thruster configuration
+- Set `InitPWM_` from `ROBOT_PWM_NEUTRAL_US` (`1500µs`)
 
 ---
 

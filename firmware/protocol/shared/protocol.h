@@ -64,14 +64,20 @@ typedef enum {
     ProtoMsg_SET_DEPTH        = 0x34,
     ProtoMsg_SET_YAW          = 0x35,
     ProtoMsg_SET_MOTION       = 0x36,
+    ProtoMsg_SET_BODY_COMMAND = 0x37,
+    ProtoMsg_BODY_CONTROL_ON  = 0x38,
+    ProtoMsg_BODY_CONTROL_OFF = 0x39,
+    ProtoMsg_SET_MOTION_TUNING = 0x3A,
 
     /* 0x40 – 0x4F : Query / Request */
     ProtoMsg_REQUEST_STATUS   = 0x40,
     ProtoMsg_REQUEST_SENSORS  = 0x41,
+    ProtoMsg_REQUEST_MOTION_TUNING = 0x42,
 
     /* 0x80 – 0x8F : Telemetry reports (STM32 → OPi) */
     ProtoMsg_STATUS_REPORT    = 0x80,
     ProtoMsg_SENSOR_REPORT    = 0x81,
+    ProtoMsg_MOTION_TUNING_REPORT = 0x82,
 
     /* 0x90 – 0x9F : Async events (STM32 → OPi) */
     ProtoMsg_LOG_MESSAGE      = 0x90,
@@ -172,10 +178,32 @@ typedef struct {
     uint8_t motion_state;     /* 0=STOP, 1=FLOAT, 2=FRONT, 3=BACK, 4=LEFT, 5=RIGHT, 6=CW, 7=CCW */
 } ProtoSetMotion;
 
+/** SET_BODY_COMMAND payload: 24 bytes, all axes normalized to [-1, +1] */
+typedef struct {
+    float surge;
+    float sway;
+    float heave;
+    float roll;
+    float pitch;
+    float yaw;
+} ProtoSetBodyCommand;
+
+/**
+ * SET_MOTION_TUNING / MOTION_TUNING_REPORT payload: 56 bytes.
+ * Axis order is surge, sway, heave, roll, pitch, yaw.
+ */
+typedef struct {
+    float axis_gain[6];
+    float axis_max_output[6];
+    float global_multiplier;
+    uint16_t pwm_slew_rate_us_per_s;
+    uint16_t command_timeout_ms;
+} ProtoMotionTuning;
+
 /** STATUS_REPORT payload: 24 bytes */
 typedef struct {
     uint8_t  safety_state;    /* ProtoSafetyState */
-    uint8_t  flags;           /* bit0=control_enable, bit1=float_enabled, bit2=angle_enabled, bit3=manual_pwm_enabled, bit4=estop_locked */
+    uint8_t  flags;           /* bit0=control, bit1=float, bit2=angle, bit3=manual, bit4=estop, bit5=body, bit6=horizontal saturated, bit7=vertical saturated */
     int16_t  pwm[8];          /* current PWM values, microseconds */
     uint16_t error_count;     /* cumulative protocol errors */
     uint16_t heartbeat_missed;
@@ -240,6 +268,10 @@ static_assert(sizeof(ProtoSetPwm) == 6U, "ProtoSetPwm wire size");
 static_assert(sizeof(ProtoSetDepth) == 4U, "ProtoSetDepth wire size");
 static_assert(sizeof(ProtoSetYaw) == 4U, "ProtoSetYaw wire size");
 static_assert(sizeof(ProtoSetMotion) == 1U, "ProtoSetMotion wire size");
+static_assert(sizeof(ProtoSetBodyCommand) == 24U,
+              "ProtoSetBodyCommand wire size");
+static_assert(sizeof(ProtoMotionTuning) == 56U,
+              "ProtoMotionTuning wire size");
 static_assert(sizeof(ProtoStatusReport) == 24U, "ProtoStatusReport wire size");
 static_assert(sizeof(ProtoSensorReport) == 72U, "ProtoSensorReport wire size");
 static_assert(sizeof(ProtoAck) == 2U, "ProtoAck wire size");
@@ -252,6 +284,10 @@ _Static_assert(sizeof(ProtoSetPwm) == 6U, "ProtoSetPwm wire size");
 _Static_assert(sizeof(ProtoSetDepth) == 4U, "ProtoSetDepth wire size");
 _Static_assert(sizeof(ProtoSetYaw) == 4U, "ProtoSetYaw wire size");
 _Static_assert(sizeof(ProtoSetMotion) == 1U, "ProtoSetMotion wire size");
+_Static_assert(sizeof(ProtoSetBodyCommand) == 24U,
+               "ProtoSetBodyCommand wire size");
+_Static_assert(sizeof(ProtoMotionTuning) == 56U,
+               "ProtoMotionTuning wire size");
 _Static_assert(sizeof(ProtoStatusReport) == 24U, "ProtoStatusReport wire size");
 _Static_assert(sizeof(ProtoSensorReport) == 72U, "ProtoSensorReport wire size");
 _Static_assert(sizeof(ProtoAck) == 2U, "ProtoAck wire size");

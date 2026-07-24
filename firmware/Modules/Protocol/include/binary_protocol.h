@@ -163,6 +163,8 @@ bool bp_expected_command_payload_length(uint8_t type, uint16_t *out_len);
 /** Build state/sensor reports from a consistent RobotData snapshot. */
 bool bp_queue_status_report(BinaryProtocol *bp, BpTxPriority priority);
 bool bp_queue_sensor_report(BinaryProtocol *bp, BpTxPriority priority);
+bool bp_queue_motion_tuning_report(BinaryProtocol *bp,
+                                   BpTxPriority priority);
 
 /**
  * @brief  Reset the RX parser (e.g. after a timeout / sync loss).

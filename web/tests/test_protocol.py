@@ -15,7 +15,7 @@ import pytest
 from protocol import (
     MAGIC_0, MAGIC_1, VERSION, FRAME_OVERHEAD, MAX_PAYLOAD, BUF_SIZE,
     MsgType, SafetyState, NackReason, SafetyEventType,
-    SetPwm, SetDepth, SetYaw, SetMotion,
+    SetPwm, SetDepth, SetYaw, SetMotion, SetBodyCommand, MotionTuning,
     StatusReport, SensorReport,
     ProtoAck, ProtoNack,
     SafetyEvent, Heartbeat, HeartbeatAck,
@@ -356,6 +356,41 @@ class TestPayloadDataclasses:
         assert isinstance(obj2, SetDepth)
         assert abs(obj2.target_depth_cm - 45.5) < 0.01
 
+    def test_set_body_command(self):
+        obj = SetBodyCommand(
+            surge=1.0,
+            sway=-1.0,
+            heave=0.5,
+            roll=-0.5,
+            pitch=0.25,
+            yaw=-0.25,
+        )
+        data = pack_payload(MsgType.SET_BODY_COMMAND, obj)
+        assert data is not None
+        assert len(data) == 24
+        obj2 = unpack_payload(MsgType.SET_BODY_COMMAND, data)
+        assert isinstance(obj2, SetBodyCommand)
+        assert obj2.values() == pytest.approx(obj.values())
+
+    def test_motion_tuning(self):
+        obj = MotionTuning(
+            axis_gain=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            axis_max_output=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            global_multiplier=0.75,
+            pwm_slew_rate_us_per_s=1500,
+            command_timeout_ms=800,
+        )
+        data = pack_payload(MsgType.SET_MOTION_TUNING, obj)
+        assert data is not None
+        assert len(data) == 56
+        obj2 = unpack_payload(MsgType.MOTION_TUNING_REPORT, data)
+        assert isinstance(obj2, MotionTuning)
+        assert obj2.axis_gain == pytest.approx(obj.axis_gain)
+        assert obj2.axis_max_output == pytest.approx(obj.axis_max_output)
+        assert obj2.global_multiplier == pytest.approx(0.75)
+        assert obj2.pwm_slew_rate_us_per_s == 1500
+        assert obj2.command_timeout_ms == 800
+
     def test_status_report(self):
         obj = StatusReport(
             safety_state=SafetyState.ARMED_IDLE,
@@ -373,8 +408,16 @@ class TestPayloadDataclasses:
         assert obj2.control_enable is True
         assert obj2.float_enabled is False
         assert obj2.manual_pwm_enabled is True
+        assert obj2.body_control_enabled is False
         assert obj2.pwm[1] == 1520
         assert obj2.error_count == 3
+
+    def test_status_report_motion_flags(self):
+        obj = StatusReport(flags=0x20 | 0x40 | 0x80)
+        obj2 = StatusReport.unpack(obj.pack())
+        assert obj2.body_control_enabled is True
+        assert obj2.horizontal_saturated is True
+        assert obj2.vertical_saturated is True
 
     def test_sensor_report(self):
         obj = SensorReport(

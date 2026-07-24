@@ -360,8 +360,11 @@ bool bp_expected_command_payload_length(uint8_t type, uint16_t *out_len)
     case ProtoMsg_FLOAT_OFF:
     case ProtoMsg_ANGLE_ON:
     case ProtoMsg_ANGLE_OFF:
+    case ProtoMsg_BODY_CONTROL_ON:
+    case ProtoMsg_BODY_CONTROL_OFF:
     case ProtoMsg_REQUEST_STATUS:
     case ProtoMsg_REQUEST_SENSORS:
+    case ProtoMsg_REQUEST_MOTION_TUNING:
         *out_len = 0U;
         return true;
 
@@ -376,6 +379,12 @@ bool bp_expected_command_payload_length(uint8_t type, uint16_t *out_len)
         return true;
     case ProtoMsg_SET_MOTION:
         *out_len = sizeof(ProtoSetMotion);
+        return true;
+    case ProtoMsg_SET_BODY_COMMAND:
+        *out_len = sizeof(ProtoSetBodyCommand);
+        return true;
+    case ProtoMsg_SET_MOTION_TUNING:
+        *out_len = sizeof(ProtoMotionTuning);
         return true;
     case ProtoMsg_HEARTBEAT:
         *out_len = sizeof(ProtoHeartbeat);

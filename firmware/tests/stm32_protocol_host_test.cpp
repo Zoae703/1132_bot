@@ -135,10 +135,30 @@ void test_command_lengths_and_abi()
 {
     uint16_t length = 0U;
     assert(PROTO_VERSION == 0x02U);
+    assert(ProtoMsg_SET_BODY_COMMAND == 0x37U);
+    assert(ProtoMsg_BODY_CONTROL_ON == 0x38U);
+    assert(ProtoMsg_BODY_CONTROL_OFF == 0x39U);
+    assert(ProtoMsg_SET_MOTION_TUNING == 0x3AU);
+    assert(ProtoMsg_REQUEST_MOTION_TUNING == 0x42U);
+    assert(ProtoMsg_MOTION_TUNING_REPORT == 0x82U);
     assert(sizeof(ProtoNack) == 4U);
     assert(sizeof(ProtoStatusReport) == 24U);
+    assert(sizeof(ProtoSetBodyCommand) == 24U);
+    assert(sizeof(ProtoMotionTuning) == 56U);
     assert(bp_expected_command_payload_length(ProtoMsg_SET_PWM, &length));
     assert(length == sizeof(ProtoSetPwm));
+    assert(bp_expected_command_payload_length(
+        ProtoMsg_SET_BODY_COMMAND, &length));
+    assert(length == sizeof(ProtoSetBodyCommand));
+    assert(bp_expected_command_payload_length(
+        ProtoMsg_SET_MOTION_TUNING, &length));
+    assert(length == sizeof(ProtoMotionTuning));
+    assert(bp_expected_command_payload_length(
+        ProtoMsg_BODY_CONTROL_ON, &length));
+    assert(length == 0U);
+    assert(bp_expected_command_payload_length(
+        ProtoMsg_REQUEST_MOTION_TUNING, &length));
+    assert(length == 0U);
     assert(bp_expected_command_payload_length(ProtoMsg_ARM, &length));
     assert(length == 0U);
     assert(!bp_expected_command_payload_length(ProtoMsg_STATUS_REPORT, &length));

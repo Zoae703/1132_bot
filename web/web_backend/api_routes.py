@@ -24,6 +24,7 @@ from opi_console.serial_transport import SerialTransport
 from opi_console.stm32_proxy import Stm32Proxy
 from opi_console.config import AppConfig, coerce_config
 from protocol import SafetyState
+from protocol import MotionTuning, SetBodyCommand
 from web_backend.ws_manager import WebSocketManager
 from web_backend.control_state import ControlState
 
@@ -103,8 +104,23 @@ class PwmCapabilitiesResponse(BaseModel):
 class FeatureCapabilitiesResponse(BaseModel):
     manual_pwm: bool
     motor_mapping: bool
+    motion_tuning: bool
     sensor_stream: bool
     emergency_stop: bool
+
+
+class MotionTuningCapabilitiesResponse(BaseModel):
+    axis_order: list[str]
+    gain_min: float
+    gain_max: float
+    axis_max_output_min: float
+    axis_max_output_max: float
+    global_multiplier_min: float
+    global_multiplier_max: float
+    pwm_slew_rate_min_us_per_s: int
+    pwm_slew_rate_max_us_per_s: int
+    command_timeout_min_ms: int
+    command_timeout_max_ms: int
 
 
 class TelemetryCapabilitiesResponse(BaseModel):
@@ -119,8 +135,30 @@ class CapabilitiesResponse(BaseModel):
     channel_count: int
     pwm: PwmCapabilitiesResponse
     features: FeatureCapabilitiesResponse
+    motion_tuning: MotionTuningCapabilitiesResponse
     telemetry: TelemetryCapabilitiesResponse
     sensor_poll_hz: float
+
+
+class MotionTuningRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    axis_gain: list[float] = Field(min_length=6, max_length=6)
+    axis_max_output: list[float] = Field(min_length=6, max_length=6)
+    global_multiplier: float
+    pwm_slew_rate_us_per_s: int = Field(strict=True)
+    command_timeout_ms: int = Field(strict=True)
+
+
+class BodyCommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    surge: float = Field(default=0.0, ge=-1.0, le=1.0)
+    sway: float = Field(default=0.0, ge=-1.0, le=1.0)
+    heave: float = Field(default=0.0, ge=-1.0, le=1.0)
+    roll: float = Field(default=0.0, ge=-1.0, le=1.0)
+    pitch: float = Field(default=0.0, ge=-1.0, le=1.0)
+    yaw: float = Field(default=0.0, ge=-1.0, le=1.0)
 
 
 # ============================================================================
@@ -226,6 +264,151 @@ def create_api_router(
             **state.sensors_to_dict(),
             "stm32_online": state.stm32_online,
             "serial_connected": transport.connected,
+        }
+
+    # ---- GET/POST /api/motion/tuning ----
+
+    @router.get("/motion/tuning")
+    async def get_motion_tuning():
+        if not app_config.features.motion_tuning:
+            raise HTTPException(403, "Motion tuning feature is disabled")
+        return proxy.motion_tuning_snapshot()
+
+    @router.post("/motion/tuning")
+    async def set_motion_tuning(req: MotionTuningRequest):
+        if not app_config.features.motion_tuning:
+            raise HTTPException(403, "Motion tuning feature is disabled")
+        _reject_during_safety_transition()
+        tuning = MotionTuning(
+            axis_gain=list(req.axis_gain),
+            axis_max_output=list(req.axis_max_output),
+            global_multiplier=req.global_multiplier,
+            pwm_slew_rate_us_per_s=req.pwm_slew_rate_us_per_s,
+            command_timeout_ms=req.command_timeout_ms,
+        )
+        async with control.lock:
+            _reject_during_safety_transition()
+            state = _online_state()
+            if state.safety_state not in (
+                SafetyState.DISARMED,
+                SafetyState.ARMED_IDLE,
+            ):
+                raise HTTPException(
+                    409,
+                    "Motion tuning can only be applied while stopped "
+                    "(DISARMED or ARMED_IDLE)",
+                )
+            try:
+                ok = await proxy.set_motion_tuning(tuning, persist=True)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            except OSError as exc:
+                logger.error("Failed to persist motion tuning: %s", exc)
+                raise HTTPException(
+                    500, f"Failed to persist motion tuning: {exc}") from exc
+        if not ok:
+            reason = (
+                proxy.motion_tuning_snapshot()["sync_error"]
+                or _failure_reason("motion tuning confirmation failed")
+            )
+            raise HTTPException(_command_failure_status(), reason)
+        return {
+            "status": "ok",
+            **proxy.motion_tuning_snapshot(),
+        }
+
+    # ---- POST /api/motion/enable ----
+
+    @router.post("/motion/enable")
+    async def enable_motion_control():
+        if not app_config.features.motion_tuning:
+            raise HTTPException(403, "Motion tuning feature is disabled")
+        _reject_motion_inhibit()
+        _reject_during_safety_transition()
+        async with control.lock:
+            _reject_during_safety_transition()
+            state = _online_state()
+            if state.safety_state != SafetyState.ARMED_IDLE:
+                raise HTTPException(
+                    409, "Must be ARMED_IDLE to enable six-axis control")
+            ok = await proxy.enable_body_control()
+        if not ok:
+            reason = _failure_reason(
+                proxy.motion_tuning_snapshot()["sync_error"]
+                or "six-axis control confirmation failed")
+            raise HTTPException(_command_failure_status(), reason)
+        return {"status": "ok", "message": "Six-axis control enabled"}
+
+    # ---- POST /api/motion/command ----
+
+    @router.post("/motion/command")
+    async def send_motion_command(req: BodyCommandRequest):
+        if not app_config.features.motion_tuning:
+            raise HTTPException(403, "Motion tuning feature is disabled")
+        _reject_motion_inhibit()
+        _reject_during_safety_transition()
+        command = SetBodyCommand(**req.model_dump())
+        async with control.lock:
+            _reject_during_safety_transition()
+            state = _online_state()
+            if (
+                state.safety_state != SafetyState.ARMED_ACTIVE
+                or not bool(state.flags & 0x20)
+            ):
+                raise HTTPException(409, "Six-axis control is not enabled")
+            ok = await proxy.send_body_command(command)
+        if not ok:
+            reason = _failure_reason("six-axis command ACK timeout")
+            raise HTTPException(_command_failure_status(), reason)
+        return {"status": "ok"}
+
+    # ---- POST /api/motion/stop ----
+
+    @router.post("/motion/stop")
+    async def stop_motion():
+        async with control.lock:
+            state = _online_state()
+            if (
+                state.safety_state == SafetyState.ARMED_ACTIVE
+                and bool(state.flags & 0x20)
+            ):
+                ok = await proxy.stop_body_motion()
+            else:
+                ok = state.safety_state in (
+                    SafetyState.DISARMED,
+                    SafetyState.ARMED_IDLE,
+                    SafetyState.EMERGENCY_STOP,
+                )
+        if not ok:
+            reason = _failure_reason("six-axis stop ACK timeout")
+            raise HTTPException(_command_failure_status(), reason)
+        return {"status": "ok", "message": "Six-axis command is zero"}
+
+    # ---- POST /api/motion/disable ----
+
+    @router.post("/motion/disable")
+    async def disable_motion_control():
+        async with control.lock:
+            state = _online_state()
+            if state.safety_state == SafetyState.ARMED_IDLE:
+                return {
+                    "status": "ok",
+                    "message": "Six-axis control already disabled",
+                }
+            if (
+                state.safety_state != SafetyState.ARMED_ACTIVE
+                or not bool(state.flags & 0x20)
+            ):
+                raise HTTPException(
+                    409, "Six-axis control is not enabled")
+            ok = await proxy.disable_body_control()
+        if not ok:
+            reason = _failure_reason(
+                "six-axis disable confirmation failed")
+            raise HTTPException(_command_failure_status(), reason)
+        return {
+            "status": "ok",
+            "message": "Six-axis control disabled and PWM neutral",
         }
 
     # ---- POST /api/arm ----
@@ -721,6 +904,7 @@ def create_api_router(
             "reconnect": bool(getattr(transport, "_reconnect_task_handle", None) and not transport._reconnect_task_handle.done()),
             "simulator_tick": bool(getattr(transport, "_sim_tick_task", None) and not transport._sim_tick_task.done()),
             "ws_broadcast": bool(getattr(ws_manager, "_broadcast_task", None) and not ws_manager._broadcast_task.done()),
+            "motion_tuning_sync": proxy.motion_tuning_sync_task_running,
         }
         return {
             "service_version": "1.0.0",
@@ -755,6 +939,7 @@ def create_api_router(
                 "motion_inhibited": control.motion_inhibited,
                 "motion_inhibit_reason": control.motion_inhibit_reason,
                 "last_disconnect_result": ws_manager.last_disconnect_safety_result,
+                "motion_tuning": proxy.motion_tuning_snapshot(),
             },
             "frames": {
                 "tx": transport.tx_frames,

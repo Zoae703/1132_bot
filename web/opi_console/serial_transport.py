@@ -134,6 +134,11 @@ class SerialTransport:
             self._connection_state = ConnectionState.CONNECTED
             self.connection_generation += 1
             self._reset_connection_context()
+            if self._sim_tick_task is None or self._sim_tick_task.done():
+                self._sim_tick_task = asyncio.create_task(
+                    self._simulator_tick_loop(),
+                    name="simulator-tick",
+                )
         else:
             await self._connect_serial()
             if not self._connected:
@@ -166,6 +171,7 @@ class SerialTransport:
             self._reader_task_handle,
             self._reconnect_task_handle,
             self._serial_reader_task_handle,
+            self._sim_tick_task,
         )
         for task in tasks:
             if task and task is not asyncio.current_task() and not task.done():
@@ -198,6 +204,7 @@ class SerialTransport:
         self._heartbeat_task_handle = None
         self._reconnect_task_handle = None
         self._serial_reader_task_handle = None
+        self._sim_tick_task = None
 
     async def _connect_serial(self) -> bool:
         """Connect to a real serial port."""
@@ -500,6 +507,21 @@ class SerialTransport:
             except Exception as e:
                 logger.error("Reader error: %s", e)
                 await self._handle_disconnect(str(e))
+                await asyncio.sleep(0.05)
+
+    async def _simulator_tick_loop(self):
+        last_tick = time.monotonic()
+        while self._running and self._sim_stm32 is not None:
+            try:
+                await asyncio.sleep(0.01)
+                now = time.monotonic()
+                dt_s = min(0.1, max(0.0, now - last_tick))
+                last_tick = now
+                await self._sim_stm32.tick(dt_s)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Simulator tick recovered from an error")
                 await asyncio.sleep(0.05)
 
     async def _parse_buffer(self):

@@ -7,7 +7,6 @@
 #include <cstring>
 #include <iostream>
 
-RobotData robot;
 namespace {
 uint32_t fake_tick = 1000U;
 
@@ -54,11 +53,63 @@ void expect_nack(BinaryProtocol *bp, uint16_t rejected_sequence,
     assert(nack.reason == reason);
 }
 
+void expect_ack(BinaryProtocol *bp, uint16_t sequence)
+{
+    const Response response = pop_response(bp);
+    assert(response.type == ProtoMsg_ACK);
+    assert(response.payload_length == sizeof(ProtoAck));
+    ProtoAck ack{};
+    std::memcpy(&ack, response.payload, sizeof(ack));
+    assert(ack.ack_seq == sequence);
+}
+
 void reset_fixture(BinaryProtocol *bp)
 {
     bp_init(bp);
     robot = RobotData{};
     fake_tick = 1000U;
+}
+
+void enter_armed_active(BinaryProtocol *bp)
+{
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x10U, nullptr, 0U);
+    expect_ack(bp, 0x10U);
+    bp_dispatch_frame(bp, ProtoMsg_FLOAT_ON, 0x11U, nullptr, 0U);
+    expect_ack(bp, 0x11U);
+    assert(robot.state == RobotState::ARMED_ACTIVE);
+    assert(robot.float_enabled);
+}
+
+void enter_body_control(BinaryProtocol *bp)
+{
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x10U, nullptr, 0U);
+    expect_ack(bp, 0x10U);
+    bp_dispatch_frame(bp, ProtoMsg_BODY_CONTROL_ON, 0x11U, nullptr, 0U);
+    expect_ack(bp, 0x11U);
+    assert(robot.state == RobotState::ARMED_ACTIVE);
+    assert(robot.control_enable);
+    assert(robot.body_control_enabled);
+    assert(!robot.float_enabled);
+    assert(!robot.angle_enabled);
+}
+
+void assert_body_output_neutral()
+{
+    assert(!robot.body_command_valid);
+    assert(robot.body_command_source == BodyCommandSource::None);
+    assert(robot.body_command.surge == 0.0F);
+    assert(robot.body_command.sway == 0.0F);
+    assert(robot.body_command.heave == 0.0F);
+    assert(robot.body_command.roll == 0.0F);
+    assert(robot.body_command.pitch == 0.0F);
+    assert(robot.body_command.yaw == 0.0F);
+    assert(!robot.horizontal_saturated);
+    assert(!robot.vertical_saturated);
+    for (uint8_t channel = 0U; channel < 8U; ++channel)
+    {
+        assert(robot.mixed_output[channel] == 0.0F);
+        assert(robot.pwm[channel] == ROBOT_PWM_NEUTRAL_US);
+    }
 }
 
 void test_length_and_unsupported_rejection(BinaryProtocol *bp)
@@ -138,7 +189,222 @@ void test_float_value_and_state_validation(BinaryProtocol *bp)
     bp_dispatch_frame(bp, ProtoMsg_SET_MOTION, 0x202U,
                       reinterpret_cast<const uint8_t *>(&motion), sizeof(motion));
     expect_nack(bp, 0x202U, ProtoMsg_SET_MOTION, ProtoNack_BadState);
-    assert(robot.motion_state == 0U);
+    assert_body_output_neutral();
+}
+
+void test_body_command_acceptance_and_fail_closed_rejection(BinaryProtocol *bp)
+{
+    reset_fixture(bp);
+    enter_body_control(bp);
+
+    const ProtoSetBodyCommand valid{
+        0.25F, -0.5F, 0.75F, -1.0F, 1.0F, 0.125F,
+    };
+    fake_tick = 2345U;
+    bp_dispatch_frame(bp, ProtoMsg_SET_BODY_COMMAND, 0x501U,
+                      reinterpret_cast<const uint8_t *>(&valid),
+                      sizeof(valid));
+    expect_ack(bp, 0x501U);
+    assert(robot.body_command_valid);
+    assert(robot.body_command_source == BodyCommandSource::BinaryProtocol);
+    assert(robot.body_command_sequence == 0x501U);
+    assert(robot.body_command_last_ms == fake_tick);
+    assert(robot.body_command_timeout_ms == ROBOT_BODY_COMMAND_TIMEOUT_MS);
+    assert(robot.last_cmd_tick == fake_tick);
+    assert(robot.body_command.surge == valid.surge);
+    assert(robot.body_command.sway == valid.sway);
+    assert(robot.body_command.heave == valid.heave);
+    assert(robot.body_command.roll == valid.roll);
+    assert(robot.body_command.pitch == valid.pitch);
+    assert(robot.body_command.yaw == valid.yaw);
+
+    ProtoSetBodyCommand invalid_cases[] = {
+        valid,
+        valid,
+        valid,
+        valid,
+        valid,
+    };
+    invalid_cases[0].surge = NAN;
+    invalid_cases[1].sway = INFINITY;
+    invalid_cases[2].heave = -INFINITY;
+    invalid_cases[3].roll = 1.001F;
+    invalid_cases[4].pitch = -1.001F;
+
+    uint16_t sequence = 0x502U;
+    for (const ProtoSetBodyCommand &invalid : invalid_cases)
+    {
+        bp_dispatch_frame(bp, ProtoMsg_SET_BODY_COMMAND, sequence,
+                          reinterpret_cast<const uint8_t *>(&invalid),
+                          sizeof(invalid));
+        expect_nack(bp, sequence, ProtoMsg_SET_BODY_COMMAND,
+                    ProtoNack_InvalidValue);
+        assert_body_output_neutral();
+        assert(robot.state == RobotState::ARMED_IDLE);
+        assert(!robot.body_control_enabled);
+
+        ++sequence;
+        bp_dispatch_frame(bp, ProtoMsg_BODY_CONTROL_ON, sequence, nullptr, 0U);
+        expect_ack(bp, sequence);
+        ++sequence;
+        ++fake_tick;
+        bp_dispatch_frame(bp, ProtoMsg_SET_BODY_COMMAND, sequence,
+                          reinterpret_cast<const uint8_t *>(&valid),
+                          sizeof(valid));
+        expect_ack(bp, sequence);
+        ++sequence;
+    }
+
+    bp_dispatch_frame(bp, ProtoMsg_SET_BODY_COMMAND, sequence,
+                      reinterpret_cast<const uint8_t *>(&valid),
+                      sizeof(valid) - 1U);
+    expect_nack(bp, sequence, ProtoMsg_SET_BODY_COMMAND,
+                ProtoNack_InvalidPayloadLength);
+    assert_body_output_neutral();
+    assert(robot.state == RobotState::ARMED_IDLE);
+
+    ++sequence;
+    bp_dispatch_frame(bp, ProtoMsg_BODY_CONTROL_ON, sequence, nullptr, 0U);
+    expect_ack(bp, sequence);
+    ++sequence;
+    bp_dispatch_frame(bp, ProtoMsg_SET_BODY_COMMAND, sequence,
+                      reinterpret_cast<const uint8_t *>(&valid),
+                      sizeof(valid));
+    expect_ack(bp, sequence);
+    robot.pwm[0] = 1600;
+    robot.mixed_output[0] = 0.5F;
+    robot.horizontal_saturated = true;
+    robot.state = RobotState::ARMED_IDLE;
+
+    ++sequence;
+    bp_dispatch_frame(bp, ProtoMsg_SET_BODY_COMMAND, sequence,
+                      reinterpret_cast<const uint8_t *>(&valid),
+                      sizeof(valid));
+    expect_nack(bp, sequence, ProtoMsg_SET_BODY_COMMAND,
+                ProtoNack_BadState);
+    assert_body_output_neutral();
+}
+
+void test_body_control_mode_and_tuning(BinaryProtocol *bp)
+{
+    reset_fixture(bp);
+
+    bp_dispatch_frame(
+        bp, ProtoMsg_REQUEST_MOTION_TUNING, 0x701U, nullptr, 0U);
+    Response response = pop_response(bp);
+    assert(response.type == ProtoMsg_MOTION_TUNING_REPORT);
+    assert(response.payload_length == sizeof(ProtoMotionTuning));
+    ProtoMotionTuning report{};
+    std::memcpy(&report, response.payload, sizeof(report));
+    assert(report.axis_gain[0] == 1.0F);
+    assert(report.axis_max_output[0] == 0.20F);
+    assert(report.axis_max_output[3] == 0.10F);
+    assert(report.global_multiplier == 1.0F);
+    assert(report.pwm_slew_rate_us_per_s == 1000U);
+    assert(report.command_timeout_ms == 500U);
+
+    ProtoMotionTuning tuning{};
+    for (uint8_t axis = 0U; axis < ROBOT_BODY_AXIS_COUNT; ++axis)
+    {
+        tuning.axis_gain[axis] = 0.5F + 0.1F * axis;
+        tuning.axis_max_output[axis] = 0.15F + 0.05F * axis;
+    }
+    tuning.global_multiplier = 0.75F;
+    tuning.pwm_slew_rate_us_per_s = 1500U;
+    tuning.command_timeout_ms = 800U;
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_MOTION_TUNING, 0x702U,
+        reinterpret_cast<const uint8_t *>(&tuning), sizeof(tuning));
+    expect_ack(bp, 0x702U);
+    assert(robot.motion_tuning.axis_gain[5] == tuning.axis_gain[5]);
+    assert(robot.motion_tuning.axis_max_output[5] ==
+           tuning.axis_max_output[5]);
+    assert(robot.motion_tuning.global_multiplier == 0.75F);
+    assert(robot.motion_tuning.pwm_slew_rate_us_per_s == 1500U);
+    assert(robot.motion_tuning.command_timeout_ms == 800U);
+    assert(robot.motion_tuning_generation == 1U);
+
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x703U, nullptr, 0U);
+    expect_ack(bp, 0x703U);
+    bp_dispatch_frame(bp, ProtoMsg_BODY_CONTROL_ON, 0x704U, nullptr, 0U);
+    expect_ack(bp, 0x704U);
+    assert(robot.body_control_enabled);
+
+    tuning.global_multiplier = 0.5F;
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_MOTION_TUNING, 0x705U,
+        reinterpret_cast<const uint8_t *>(&tuning), sizeof(tuning));
+    expect_nack(
+        bp, 0x705U, ProtoMsg_SET_MOTION_TUNING, ProtoNack_BadState);
+    assert(robot.motion_tuning.global_multiplier == 0.75F);
+
+    bp_dispatch_frame(bp, ProtoMsg_BODY_CONTROL_OFF, 0x706U, nullptr, 0U);
+    expect_ack(bp, 0x706U);
+    assert(robot.state == RobotState::ARMED_IDLE);
+    assert(!robot.control_enable);
+    assert(!robot.body_control_enabled);
+    assert_body_output_neutral();
+
+    tuning.axis_gain[0] = NAN;
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_MOTION_TUNING, 0x707U,
+        reinterpret_cast<const uint8_t *>(&tuning), sizeof(tuning));
+    expect_nack(
+        bp, 0x707U, ProtoMsg_SET_MOTION_TUNING,
+        ProtoNack_InvalidValue);
+}
+
+void test_legacy_motion_maps_to_body_command(BinaryProtocol *bp)
+{
+    reset_fixture(bp);
+    enter_armed_active(bp);
+
+    struct LegacyCase {
+        uint8_t state;
+        float surge;
+        float sway;
+        float yaw;
+    };
+    constexpr float surge_scale = 80.0F / 450.0F;
+    constexpr float yaw_scale = 40.0F / 450.0F;
+    const LegacyCase cases[] = {
+        {0U, 0.0F, 0.0F, 0.0F},
+        {1U, 0.0F, 0.0F, 0.0F},
+        {2U, surge_scale, 0.0F, 0.0F},
+        {3U, -surge_scale, 0.0F, 0.0F},
+        {4U, 0.0F, -surge_scale, 0.0F},
+        {5U, 0.0F, surge_scale, 0.0F},
+        {6U, 0.0F, 0.0F, yaw_scale},
+        {7U, 0.0F, 0.0F, -yaw_scale},
+    };
+
+    uint16_t sequence = 0x601U;
+    for (const LegacyCase &entry : cases)
+    {
+        const ProtoSetMotion motion{entry.state};
+        bp_dispatch_frame(bp, ProtoMsg_SET_MOTION, sequence,
+                          reinterpret_cast<const uint8_t *>(&motion),
+                          sizeof(motion));
+        expect_ack(bp, sequence);
+        assert(robot.body_command_valid);
+        assert(robot.body_command_source ==
+               BodyCommandSource::LegacySetMotion);
+        assert(robot.body_command_sequence == sequence);
+        assert(robot.body_command.surge == entry.surge);
+        assert(robot.body_command.sway == entry.sway);
+        assert(robot.body_command.heave == 0.0F);
+        assert(robot.body_command.roll == 0.0F);
+        assert(robot.body_command.pitch == 0.0F);
+        assert(robot.body_command.yaw == entry.yaw);
+        ++sequence;
+    }
+
+    const ProtoSetMotion invalid{8U};
+    bp_dispatch_frame(bp, ProtoMsg_SET_MOTION, sequence,
+                      reinterpret_cast<const uint8_t *>(&invalid),
+                      sizeof(invalid));
+    expect_nack(bp, sequence, ProtoMsg_SET_MOTION, ProtoNack_InvalidValue);
+    assert_body_output_neutral();
 }
 
 void test_estop_remains_latched_across_disarm(BinaryProtocol *bp)
@@ -220,6 +486,9 @@ int main()
     test_length_and_unsupported_rejection(bp);
     test_pwm_validation_and_sequence(bp);
     test_float_value_and_state_validation(bp);
+    test_body_command_acceptance_and_fail_closed_rejection(bp);
+    test_body_control_mode_and_tuning(bp);
+    test_legacy_motion_maps_to_body_command(bp);
     test_estop_remains_latched_across_disarm(bp);
     test_set_all_neutral_exits_manual_mode(bp);
     std::cout << "stm32 protocol handler host tests: PASS\n";

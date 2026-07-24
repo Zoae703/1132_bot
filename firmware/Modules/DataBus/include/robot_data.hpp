@@ -7,8 +7,14 @@ inline constexpr int32_t ROBOT_PWM_MAX_US = 2000;
 inline constexpr int32_t ROBOT_PWM_TEST_MIN_US = 1000;
 inline constexpr int32_t ROBOT_PWM_TEST_MAX_US = 2000;
 inline constexpr uint32_t ROBOT_COMMAND_TIMEOUT_MS = 500U;
+inline constexpr uint32_t ROBOT_BODY_COMMAND_TIMEOUT_MS = 500U;
 inline constexpr uint32_t ROBOT_MANUAL_PWM_TIMEOUT_MS = 500U;
 inline constexpr uint32_t ROBOT_HEARTBEAT_TIMEOUT_MS = 1000U;
+inline constexpr uint8_t ROBOT_BODY_AXIS_COUNT = 6U;
+inline constexpr uint16_t ROBOT_PWM_SLEW_RATE_MIN_US_PER_S = 100U;
+inline constexpr uint16_t ROBOT_PWM_SLEW_RATE_MAX_US_PER_S = 5000U;
+inline constexpr uint16_t ROBOT_BODY_COMMAND_TIMEOUT_MIN_MS = 200U;
+inline constexpr uint16_t ROBOT_BODY_COMMAND_TIMEOUT_MAX_MS = 2000U;
 
 enum class RobotState : uint8_t {
     DISARMED = 0,
@@ -18,6 +24,33 @@ enum class RobotState : uint8_t {
     COMM_LOST = 4,
     EMERGENCY_STOP = 5,
     FAULT = 6
+};
+
+struct BodyCommand {
+    float surge = 0.0F;
+    float sway = 0.0F;
+    float heave = 0.0F;
+    float roll = 0.0F;
+    float pitch = 0.0F;
+    float yaw = 0.0F;
+};
+
+struct MotionTuning {
+    float axis_gain[ROBOT_BODY_AXIS_COUNT] = {
+        1.0F, 1.0F, 1.0F, 1.0F, 1.0F, 1.0F
+    };
+    float axis_max_output[ROBOT_BODY_AXIS_COUNT] = {
+        0.20F, 0.20F, 0.20F, 0.10F, 0.10F, 0.10F
+    };
+    float global_multiplier = 1.0F;
+    uint16_t pwm_slew_rate_us_per_s = 1000U;
+    uint16_t command_timeout_ms = ROBOT_BODY_COMMAND_TIMEOUT_MS;
+};
+
+enum class BodyCommandSource : uint8_t {
+    None = 0,
+    LegacySetMotion = 1,
+    BinaryProtocol = 2,
 };
 
 struct RobotData {
@@ -64,7 +97,21 @@ struct RobotData {
     };
     uint32_t manual_pwm_last_ms = 0;
     uint32_t last_cmd_tick = 0;
-    uint8_t motion_state = 0;       // 0=STOP, 1=FLOAT, 2=FRONT, 3=BACK, 4=LEFT, 5=RIGHT, 6=CLOCKWISE, 7=ANTICLOCKWISE
+
+    // === Unified continuous body command ===
+    BodyCommand body_command{};
+    BodyCommandSource body_command_source = BodyCommandSource::None;
+    uint16_t body_command_sequence = 0;
+    uint32_t body_command_last_ms = 0;
+    uint32_t body_command_timeout_ms = ROBOT_BODY_COMMAND_TIMEOUT_MS;
+    bool body_command_valid = false;
+    bool body_control_enabled = false;
+    MotionTuning motion_tuning{};
+    uint32_t motion_tuning_generation = 0;
+    float mixed_output[8] = {0.0F};
+    bool horizontal_saturated = false;
+    bool vertical_saturated = false;
+    uint32_t pwm_output_generation = 0;
 
     // === Safety state machine ===
     RobotState state = RobotState::DISARMED;
@@ -93,5 +140,12 @@ struct RobotData {
     uint32_t uptime_s = 0;
     uint32_t last_uptime_tick = 0;
 };
+
+bool body_command_is_valid(const BodyCommand &command);
+bool body_command_is_zero(const BodyCommand &command);
+bool motion_tuning_is_valid(const MotionTuning &tuning);
+void invalidate_body_command(RobotData &data);
+void mark_pwm_output_updated(RobotData &data);
+void force_body_output_neutral(RobotData &data);
 
 extern RobotData robot;

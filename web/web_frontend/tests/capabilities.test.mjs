@@ -27,8 +27,22 @@ function validCapabilities() {
     features: {
       manual_pwm: true,
       motor_mapping: true,
+      motion_tuning: true,
       sensor_stream: true,
       emergency_stop: true,
+    },
+    motion_tuning: {
+      axis_order: ['surge', 'sway', 'heave', 'roll', 'pitch', 'yaw'],
+      gain_min: 0,
+      gain_max: 2,
+      axis_max_output_min: 0,
+      axis_max_output_max: 1,
+      global_multiplier_min: 0,
+      global_multiplier_max: 1,
+      pwm_slew_rate_min_us_per_s: 100,
+      pwm_slew_rate_max_us_per_s: 5000,
+      command_timeout_min_ms: 200,
+      command_timeout_max_ms: 2000,
     },
     telemetry: {
       status_hz: 5,
@@ -44,6 +58,7 @@ test('locked capabilities cannot command movement', () => {
   assert.equal(LOCKED_CAPABILITIES.pwm.neutral_us, 1500);
   assert.equal(LOCKED_CAPABILITIES.pwm.min_test_us, 1500);
   assert.equal(LOCKED_CAPABILITIES.pwm.max_test_us, 1500);
+  assert.equal(LOCKED_CAPABILITIES.features.motion_tuning, false);
 });
 
 test('valid backend capabilities are normalized', () => {
@@ -76,4 +91,8 @@ test('neutral, PWM bounds, and duration invariants are enforced', () => {
   const invalidPollRate = validCapabilities();
   invalidPollRate.sensor_poll_hz = 0;
   assert.throws(() => normalizeCapabilities(invalidPollRate), /sensor_poll_hz/);
+
+  const invalidTuning = validCapabilities();
+  invalidTuning.motion_tuning.command_timeout_min_ms = 2500;
+  assert.throws(() => normalizeCapabilities(invalidTuning), /运动调参/);
 });

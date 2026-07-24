@@ -162,12 +162,21 @@ bool PCA9685_Init(I2C_HandleTypeDef *hi2c)
     return ok;
 }
 
-bool PCA9685_SetAllPWM(const int32_t pwm_us[8])
+bool PCA9685_SetAllPWMGuarded(
+    const int32_t pwm_us[8],
+    PCA9685_OutputGuard output_guard,
+    const void *guard_context,
+    uint32_t expected_generation,
+    bool *superseded)
 {
     bool ok = true;
+    bool output_superseded = false;
 
     if (pwm_us == nullptr) {
         return false;
+    }
+    if (superseded != nullptr) {
+        *superseded = false;
     }
 
     if (!PCA9685_BeginTransaction()) {
@@ -175,9 +184,43 @@ bool PCA9685_SetAllPWM(const int32_t pwm_us[8])
     }
 
     for (uint8_t i = 0U; i < 8U; i++) {
-        ok = ok && PCA9685_WritePwmUnlocked(i, 0U, PCA9685_UsToCount(pwm_us[i]));
+        if (output_guard != nullptr &&
+            !output_guard(guard_context, expected_generation)) {
+            output_superseded = true;
+            break;
+        }
+        if (!PCA9685_WritePwmUnlocked(
+                i, 0U, PCA9685_UsToCount(pwm_us[i]))) {
+            ok = false;
+            break;
+        }
+    }
+
+    if (output_guard != nullptr &&
+        !output_guard(guard_context, expected_generation)) {
+        output_superseded = true;
+    }
+
+    if (output_superseded) {
+        for (uint8_t i = 0U; i < 8U; i++) {
+            if (!PCA9685_WritePwmUnlocked(
+                    i, 0U,
+                    PCA9685_UsToCount(PCA9685_PWM_NEUTRAL_US))) {
+                ok = false;
+                break;
+            }
+        }
     }
 
     PCA9685_EndTransaction();
+    if (superseded != nullptr) {
+        *superseded = output_superseded;
+    }
     return ok;
+}
+
+bool PCA9685_SetAllPWM(const int32_t pwm_us[8])
+{
+    return PCA9685_SetAllPWMGuarded(
+        pwm_us, nullptr, nullptr, 0U, nullptr);
 }

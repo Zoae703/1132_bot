@@ -27,6 +27,92 @@ interface Notice {
   text: string;
 }
 
+type MotionAxis = 'surge' | 'sway' | 'heave' | 'roll' | 'pitch' | 'yaw';
+
+interface MotionTuningValues {
+  axis_gain: number[];
+  axis_max_output: number[];
+  global_multiplier: number;
+  pwm_slew_rate_us_per_s: number;
+  command_timeout_ms: number;
+}
+
+interface MotionTuningSnapshot {
+  desired: MotionTuningValues;
+  confirmed: MotionTuningValues | null;
+  synced: boolean;
+  sync_state: string;
+  sync_error: string | null;
+}
+
+const DEFAULT_MOTION_TUNING: MotionTuningValues = {
+  axis_gain: [1, 1, 1, 1, 1, 1],
+  axis_max_output: [0.2, 0.2, 0.2, 0.1, 0.1, 0.1],
+  global_multiplier: 1,
+  pwm_slew_rate_us_per_s: 1000,
+  command_timeout_ms: 500,
+};
+
+const MOTION_AXES: Array<{
+  key: MotionAxis;
+  name: string;
+  positive: string;
+  negative: string;
+}> = [
+  { key: 'surge', name: '纵向', positive: '前进', negative: '后退' },
+  { key: 'sway', name: '横向', positive: '右移', negative: '左移' },
+  { key: 'heave', name: '垂向', positive: '下潜', negative: '上浮' },
+  { key: 'roll', name: '横滚', positive: '横滚 +', negative: '横滚 -' },
+  { key: 'pitch', name: '俯仰', positive: '俯仰 +', negative: '俯仰 -' },
+  { key: 'yaw', name: '偏航', positive: '右转', negative: '左转' },
+];
+
+function tuningValues(raw: unknown): MotionTuningValues | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  if (
+    !Array.isArray(value.axis_gain)
+    || !Array.isArray(value.axis_max_output)
+    || value.axis_gain.length !== 6
+    || value.axis_max_output.length !== 6
+  ) return null;
+  const gains = value.axis_gain.map(Number);
+  const limits = value.axis_max_output.map(Number);
+  const globalMultiplier = Number(value.global_multiplier);
+  const slew = Number(value.pwm_slew_rate_us_per_s);
+  const timeout = Number(value.command_timeout_ms);
+  if (
+    [...gains, ...limits, globalMultiplier, slew, timeout]
+      .some(item => !Number.isFinite(item))
+  ) return null;
+  return {
+    axis_gain: gains,
+    axis_max_output: limits,
+    global_multiplier: globalMultiplier,
+    pwm_slew_rate_us_per_s: Math.round(slew),
+    command_timeout_ms: Math.round(timeout),
+  };
+}
+
+function normalizeTuningSnapshot(raw: unknown): MotionTuningSnapshot {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('运动参数响应格式无效');
+  }
+  const value = raw as Record<string, unknown>;
+  const desired = tuningValues(value.desired);
+  const confirmed = value.confirmed === null ? null : tuningValues(value.confirmed);
+  if (!desired || (value.confirmed !== null && !confirmed)) {
+    throw new Error('运动参数响应缺少六轴数据');
+  }
+  return {
+    desired,
+    confirmed,
+    synced: value.synced === true,
+    sync_state: typeof value.sync_state === 'string' ? value.sync_state : 'unknown',
+    sync_error: typeof value.sync_error === 'string' ? value.sync_error : null,
+  };
+}
+
 function useWebSocket() {
   const [status, setStatus] = useState<RobotStatus | null>(null);
   const [connected, setConnected] = useState(false);
@@ -185,6 +271,32 @@ async function apiPost(path: string, body?: unknown, signal?: AbortSignal) {
     return res.json().catch(() => ({}));
   } catch (error) {
     if (timedOut) throw new Error('请求超时，未确认 STM32 是否执行');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', abortFromCaller);
+  }
+}
+
+async function apiGet(path: string, signal?: AbortSignal) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromCaller = () => controller.abort();
+  if (signal?.aborted) abortFromCaller();
+  else signal?.addEventListener('abort', abortFromCaller, { once: true });
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 6000);
+  try {
+    const response = await fetch(path, { signal: controller.signal });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(apiErrorMessage(error.detail, response.statusText || '请求失败'));
+    }
+    return response.json();
+  } catch (error) {
+    if (timedOut) throw new Error('请求超时');
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -451,6 +563,13 @@ function SystemPanel({ status, connected }: { status: RobotStatus | null; connec
         />
         <Metric label="定深" value={status.float_enabled ? '开启' : '关闭'} tone={status.float_enabled ? 'good' : 'muted'} />
         <Metric label="角度闭环" value={status.angle_enabled ? '开启' : '关闭'} tone={status.angle_enabled ? 'good' : 'muted'} />
+        <Metric label="六轴控制" value={status.body_control_enabled ? '开启' : '关闭'} tone={status.body_control_enabled ? 'good' : 'muted'} />
+        <Metric
+          label="运动参数"
+          value={status.motion_tuning_synced ? '已同步' : '未同步'}
+          hint={status.motion_tuning_sync_error ?? status.motion_tuning_sync_state}
+          tone={status.motion_tuning_synced ? 'good' : 'warn'}
+        />
         <Metric label="协议错误" value={String(status.error_count)} tone={status.error_count > 0 ? 'warn' : 'muted'} />
         <Metric label="心跳丢失" value={String(status.heartbeat_missed)} tone={status.heartbeat_missed > 0 ? 'warn' : 'muted'} />
       </div>
@@ -746,6 +865,14 @@ function PwmPanel({
     setSelectedChannel(channel);
   };
 
+  const setPwmClamped = (value: number) => {
+    if (!Number.isFinite(value)) return;
+    setPwmValue(Math.min(
+      capabilities.pwm.max_test_us,
+      Math.max(capabilities.pwm.min_test_us, Math.round(value)),
+    ));
+  };
+
   if (!status) {
     return (
       <Panel title="PWM 手动测试" eyebrow="PWM">
@@ -778,7 +905,7 @@ function PwmPanel({
       <div className="channel-grid">
         {channels.map(channel => {
           const pwm = status.confirmed_pwm[channel];
-          const active = Number.isFinite(pwm) && Math.abs(pwm - capabilities.pwm.neutral_us) >= 5;
+          const active = Number.isFinite(pwm) && Math.abs(pwm - capabilities.pwm.neutral_us) >= 1;
           const selected = channel === selectedChannel;
           return (
             <button
@@ -798,17 +925,30 @@ function PwmPanel({
       <div className="pwm-controls">
         <label className="slider-block">
           <span>PWM 脉宽：{pwmValue}us</span>
+          <div className="pwm-value-editor">
+            <button type="button" disabled={!canTest} onClick={() => setPwmClamped(pwmValue - 10)}>-10</button>
+            <button type="button" disabled={!canTest} onClick={() => setPwmClamped(pwmValue - 1)}>-1</button>
+            <input
+              type="number"
+              min={capabilities.pwm.min_test_us}
+              max={capabilities.pwm.max_test_us}
+              step={1}
+              value={pwmValue}
+              disabled={!canTest}
+              aria-label="PWM 脉宽，单位微秒"
+              onChange={event => setPwmClamped(Number(event.target.value))}
+            />
+            <button type="button" disabled={!canTest} onClick={() => setPwmClamped(pwmValue + 1)}>+1</button>
+            <button type="button" disabled={!canTest} onClick={() => setPwmClamped(pwmValue + 10)}>+10</button>
+          </div>
           <input
             type="range"
             min={capabilities.pwm.min_test_us}
             max={capabilities.pwm.max_test_us}
-            step={5}
+            step={1}
             value={pwmValue}
             disabled={!canTest}
-            onChange={event => {
-              const value = Number(event.target.value);
-              if (Number.isFinite(value)) setPwmValue(value);
-            }}
+            onChange={event => setPwmClamped(Number(event.target.value))}
           />
           <div className="slider-scale">
             <span>{capabilities.pwm.min_test_us} 反向</span>
@@ -862,6 +1002,507 @@ function PwmPanel({
   );
 }
 
+function MotionTuningPanel({
+  status,
+  connected,
+  capabilities,
+  capabilitiesReady,
+  safetyLocked,
+  connectionVersion,
+  onError,
+  onEvent,
+}: {
+  status: RobotStatus | null;
+  connected: boolean;
+  capabilities: Capabilities;
+  capabilitiesReady: boolean;
+  safetyLocked: boolean;
+  connectionVersion: number;
+  onError: (msg: string) => void;
+  onEvent: (msg: string) => void;
+}) {
+  const [tuning, setTuning] = useState<MotionTuningValues>(DEFAULT_MOTION_TUNING);
+  const [snapshot, setSnapshot] = useState<MotionTuningSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
+  const [heldButton, setHeldButton] = useState<string | null>(null);
+  const heldRef = useRef<{ axis: MotionAxis; value: number; epoch: number } | null>(null);
+  const holdTimerRef = useRef<number | null>(null);
+  const holdEpochRef = useRef(0);
+  const commandInFlightRef = useRef(false);
+  const commandPromiseRef = useRef<Promise<void> | null>(null);
+  const modeActiveRef = useRef(false);
+
+  const applySnapshot = useCallback((value: MotionTuningSnapshot) => {
+    setSnapshot(value);
+    setTuning({
+      ...value.desired,
+      axis_gain: [...value.desired.axis_gain],
+      axis_max_output: [...value.desired.axis_max_output],
+    });
+  }, []);
+
+  const reloadTuning = useCallback(async (announce = true) => {
+    if (!connected || !capabilitiesReady || !capabilities.features.motion_tuning) return;
+    setLoading(true);
+    try {
+      const value = normalizeTuningSnapshot(await apiGet('/api/motion/tuning'));
+      applySnapshot(value);
+      if (announce) onEvent('运动参数已重新加载');
+    } catch (error) {
+      onError(`加载运动参数失败：${error instanceof Error ? error.message : '未知错误'}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    applySnapshot,
+    capabilities.features.motion_tuning,
+    capabilitiesReady,
+    connected,
+    onError,
+    onEvent,
+  ]);
+
+  useEffect(() => {
+    if (!connected || !capabilitiesReady || !capabilities.features.motion_tuning) return;
+    const controller = new AbortController();
+    setLoading(true);
+    void apiGet('/api/motion/tuning', controller.signal)
+      .then(value => applySnapshot(normalizeTuningSnapshot(value)))
+      .catch(error => {
+        if (!controller.signal.aborted) {
+          onError(`加载运动参数失败：${error instanceof Error ? error.message : '未知错误'}`);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    applySnapshot,
+    capabilities.features.motion_tuning,
+    capabilitiesReady,
+    connected,
+    connectionVersion,
+    onError,
+  ]);
+
+  const clamp = (value: number, min: number, max: number) => (
+    Math.min(max, Math.max(min, value))
+  );
+
+  const setAxisValue = (
+    field: 'axis_gain' | 'axis_max_output',
+    index: number,
+    value: number,
+  ) => {
+    if (!Number.isFinite(value)) return;
+    const limits = capabilities.motion_tuning;
+    const min = field === 'axis_gain' ? limits.gain_min : limits.axis_max_output_min;
+    const max = field === 'axis_gain' ? limits.gain_max : limits.axis_max_output_max;
+    setTuning(current => {
+      const next = [...current[field]];
+      next[index] = clamp(value, min, max);
+      return { ...current, [field]: next };
+    });
+  };
+
+  const stopped = Boolean(status && (
+    status.safety_state === 0 || status.safety_state === 1
+  ));
+  const tuningReady = Boolean(
+    connected
+    && capabilitiesReady
+    && capabilities.features.motion_tuning
+    && status
+    && status.stm32_online
+    && !status.status_stale,
+  );
+  const canSave = tuningReady && stopped && !safetyLocked && !loading && !saving && !modeBusy;
+  const modeActive = Boolean(
+    status?.safety_state === 2 && status.body_control_enabled,
+  );
+  modeActiveRef.current = modeActive;
+  const canEnable = Boolean(
+    tuningReady
+    && status?.safety_state === 1
+    && !safetyLocked
+    && !modeBusy,
+  );
+  const canDisable = Boolean(tuningReady && modeActive && !modeBusy);
+  const holdAllowed = Boolean(
+    tuningReady
+    && modeActive
+    && status?.motion_tuning_synced
+    && !safetyLocked
+    && !modeBusy,
+  );
+
+  const saveTuning = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    try {
+      const value = normalizeTuningSnapshot(
+        await apiPost('/api/motion/tuning', tuning),
+      );
+      applySnapshot(value);
+      onEvent('运动参数已保存到 Orange Pi，并由 STM32 回读确认');
+    } catch (error) {
+      onError(`保存运动参数失败：${error instanceof Error ? error.message : '未知错误'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearLocalHold = useCallback(() => {
+    holdEpochRef.current += 1;
+    heldRef.current = null;
+    if (holdTimerRef.current !== null) {
+      clearInterval(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+    setHeldButton(null);
+  }, []);
+
+  const releaseHold = useCallback((announce = false) => {
+    if (!heldRef.current) return;
+    const pendingCommand = commandPromiseRef.current;
+    clearLocalHold();
+    const sendStop = (reportSuccess: boolean) => apiPost('/api/motion/stop')
+      .then(() => {
+        if (reportSuccess) onEvent('六轴按键已松开，零指令已发送');
+      })
+      .catch(error => {
+        onError(`六轴停止失败：${error instanceof Error ? error.message : '未知错误'}`);
+      });
+    void sendStop(announce);
+    if (pendingCommand) {
+      void pendingCommand.finally(() => sendStop(false)).catch(() => undefined);
+    }
+  }, [clearLocalHold, onError, onEvent]);
+
+  const sendHeldCommand = useCallback(async (epoch: number) => {
+    const held = heldRef.current;
+    if (!held || held.epoch !== epoch || commandInFlightRef.current) return;
+    commandInFlightRef.current = true;
+    const command: Record<MotionAxis, number> = {
+      surge: 0,
+      sway: 0,
+      heave: 0,
+      roll: 0,
+      pitch: 0,
+      yaw: 0,
+    };
+    command[held.axis] = held.value;
+    const operation = apiPost('/api/motion/command', command)
+      .then(() => undefined)
+      .catch(error => {
+        if (heldRef.current?.epoch === epoch) {
+          clearLocalHold();
+          onError(`六轴控制命令失败：${error instanceof Error ? error.message : '未知错误'}`);
+          void apiPost('/api/motion/stop').catch(() => undefined);
+        }
+      });
+    commandPromiseRef.current = operation;
+    try {
+      await operation;
+    } finally {
+      if (commandPromiseRef.current === operation) {
+        commandPromiseRef.current = null;
+      }
+      commandInFlightRef.current = false;
+    }
+  }, [clearLocalHold, onError]);
+
+  const startHold = (
+    event: React.PointerEvent<HTMLButtonElement>,
+    axis: MotionAxis,
+    value: number,
+  ) => {
+    if (!holdAllowed || heldRef.current) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const epoch = ++holdEpochRef.current;
+    heldRef.current = { axis, value, epoch };
+    setHeldButton(`${axis}:${value}`);
+    void sendHeldCommand(epoch);
+    holdTimerRef.current = window.setInterval(() => {
+      void sendHeldCommand(epoch);
+    }, 100);
+  };
+
+  useEffect(() => {
+    const stop = () => releaseHold(false);
+    const visibility = () => {
+      if (document.hidden) stop();
+    };
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('blur', stop);
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('blur', stop);
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [releaseHold]);
+
+  useEffect(() => {
+    if (!holdAllowed && heldRef.current) releaseHold(false);
+  }, [holdAllowed, releaseHold]);
+
+  useEffect(() => () => {
+    const wasHeld = Boolean(heldRef.current);
+    const pendingCommand = commandPromiseRef.current;
+    clearLocalHold();
+    if (modeActiveRef.current) {
+      void apiPost('/api/motion/disable').catch(() => undefined);
+      if (pendingCommand) {
+        void pendingCommand.finally(
+          () => apiPost('/api/motion/disable'),
+        ).catch(() => undefined);
+      }
+    } else if (wasHeld) {
+      void apiPost('/api/motion/stop').catch(() => undefined);
+      if (pendingCommand) {
+        void pendingCommand.finally(
+          () => apiPost('/api/motion/stop'),
+        ).catch(() => undefined);
+      }
+    }
+  }, [clearLocalHold]);
+
+  const runModeCommand = async (path: string, success: string) => {
+    if (modeBusy) return;
+    setModeBusy(true);
+    try {
+      await apiPost(path);
+      onEvent(success);
+      await reloadTuning(false);
+    } catch (error) {
+      onError(`${success}失败：${error instanceof Error ? error.message : '未知错误'}`);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const disableMotion = () => {
+    releaseHold(false);
+    void runModeCommand('/api/motion/disable', '六轴控制已退出并硬回中');
+  };
+
+  const limits = capabilities.motion_tuning;
+  const syncConfirmed = status?.motion_tuning_synced ?? snapshot?.synced ?? false;
+  const syncError = status?.motion_tuning_sync_error ?? snapshot?.sync_error;
+
+  return (
+    <Panel title="运动调参" eyebrow="6-DOF MOTION" className="panel--wide">
+      {!capabilities.features.motion_tuning && (
+        <div className="inline-error">后端未启用运动调参能力。</div>
+      )}
+
+      <div className="motion-toolbar">
+        <div>
+          <div className="control-summary__label">参数与模式状态</div>
+          <div className={`control-summary__value ${syncConfirmed ? 'is-ready' : ''}`}>
+            {syncConfirmed ? '参数已由 STM32 回读确认' : syncError ?? '等待参数同步'}
+          </div>
+        </div>
+        <div className="control-summary__actions">
+          <button className="btn btn--secondary" disabled={!tuningReady || loading} onClick={() => void reloadTuning()}>
+            {loading ? '加载中' : '重新加载'}
+          </button>
+          <button className="btn btn--primary" disabled={!canSave} onClick={() => void saveTuning()}>
+            {saving ? '保存中' : '保存并同步'}
+          </button>
+          {status?.safety_state === 1 && (
+            <button
+              className="btn btn--primary"
+              disabled={!canEnable}
+              onClick={() => void runModeCommand('/api/motion/enable', '六轴控制已启用')}
+            >
+              {modeBusy ? '处理中' : '进入六轴控制'}
+            </button>
+          )}
+          {modeActive && (
+            <button className="btn btn--warning" disabled={!canDisable} onClick={disableMotion}>
+              停止并退出
+            </button>
+          )}
+        </div>
+      </div>
+
+      {!stopped && (
+        <div className="inline-warning">
+          当前处于运行状态，参数输入已锁定。先松开按键并点击“停止并退出”，再保存参数。
+        </div>
+      )}
+
+      <div className="tuning-table">
+        <div className="tuning-table__head">
+          <span>轴</span>
+          <span>轴增益</span>
+          <span>最大输出</span>
+        </div>
+        {MOTION_AXES.map((axis, index) => (
+          <div className="tuning-table__row" key={axis.key}>
+            <div>
+              <strong>{axis.name}</strong>
+              <small>{axis.key}</small>
+            </div>
+            <label>
+              <input
+                type="number"
+                min={limits.gain_min}
+                max={limits.gain_max}
+                step={0.01}
+                value={tuning.axis_gain[index]}
+                disabled={!stopped || !tuningReady}
+                onChange={event => setAxisValue('axis_gain', index, Number(event.target.value))}
+              />
+              <span>倍</span>
+            </label>
+            <label>
+              <input
+                type="number"
+                min={limits.axis_max_output_min * 100}
+                max={limits.axis_max_output_max * 100}
+                step={1}
+                value={Math.round(tuning.axis_max_output[index] * 100)}
+                disabled={!stopped || !tuningReady}
+                onChange={event => setAxisValue(
+                  'axis_max_output',
+                  index,
+                  Number(event.target.value) / 100,
+                )}
+              />
+              <span>%</span>
+            </label>
+          </div>
+        ))}
+      </div>
+
+      <div className="global-tuning-grid">
+        <label>
+          <span>全局倍率</span>
+          <div>
+            <input
+              type="range"
+              min={limits.global_multiplier_min * 100}
+              max={limits.global_multiplier_max * 100}
+              step={1}
+              value={Math.round(tuning.global_multiplier * 100)}
+              disabled={!stopped || !tuningReady}
+              onChange={event => setTuning(current => ({
+                ...current,
+                global_multiplier: clamp(
+                  Number(event.target.value) / 100,
+                  limits.global_multiplier_min,
+                  limits.global_multiplier_max,
+                ),
+              }))}
+            />
+            <strong>{Math.round(tuning.global_multiplier * 100)}%</strong>
+          </div>
+        </label>
+        <label>
+          <span>PWM 斜率</span>
+          <div>
+            <input
+              type="number"
+              min={limits.pwm_slew_rate_min_us_per_s}
+              max={limits.pwm_slew_rate_max_us_per_s}
+              step={1}
+              value={tuning.pwm_slew_rate_us_per_s}
+              disabled={!stopped || !tuningReady}
+              onChange={event => setTuning(current => ({
+                ...current,
+                pwm_slew_rate_us_per_s: Math.round(clamp(
+                  Number(event.target.value),
+                  limits.pwm_slew_rate_min_us_per_s,
+                  limits.pwm_slew_rate_max_us_per_s,
+                )),
+              }))}
+            />
+            <span>us/s</span>
+          </div>
+        </label>
+        <label>
+          <span>命令超时</span>
+          <div>
+            <input
+              type="number"
+              min={limits.command_timeout_min_ms}
+              max={limits.command_timeout_max_ms}
+              step={1}
+              value={tuning.command_timeout_ms}
+              disabled={!stopped || !tuningReady}
+              onChange={event => setTuning(current => ({
+                ...current,
+                command_timeout_ms: Math.round(clamp(
+                  Number(event.target.value),
+                  limits.command_timeout_min_ms,
+                  limits.command_timeout_max_ms,
+                )),
+              }))}
+            />
+            <span>ms</span>
+          </div>
+        </label>
+      </div>
+
+      <div className="axis-control-head">
+        <div>
+          <h3>六轴点动</h3>
+          <p>按住持续发送，松开即发送零指令。按钮输出先经过本页增益、限幅和全局倍率。</p>
+        </div>
+        <div className="axis-control-state">
+          <StatusBadge label={modeActive ? '六轴模式已开启' : '六轴模式未开启'} tone={modeActive ? 'ok' : 'muted'} />
+          <StatusBadge
+            label={status?.horizontal_saturated ? '水平组已限幅' : '水平组正常'}
+            tone={status?.horizontal_saturated ? 'warning' : 'muted'}
+          />
+          <StatusBadge
+            label={status?.vertical_saturated ? '垂直组已限幅' : '垂直组正常'}
+            tone={status?.vertical_saturated ? 'warning' : 'muted'}
+          />
+        </div>
+      </div>
+
+      <div className="axis-control-grid">
+        {MOTION_AXES.map(axis => (
+          <div className="axis-control" key={axis.key}>
+            <div className="axis-control__name">
+              <strong>{axis.name}</strong>
+              <span>{axis.key}</span>
+            </div>
+            <button
+              className={`axis-button axis-button--negative ${heldButton === `${axis.key}:-1` ? 'is-held' : ''}`}
+              disabled={!holdAllowed}
+              onPointerDown={event => startHold(event, axis.key, -1)}
+              onPointerUp={() => releaseHold(true)}
+              onPointerCancel={() => releaseHold(false)}
+            >
+              {axis.negative}
+              <small>-100%</small>
+            </button>
+            <button
+              className={`axis-button axis-button--positive ${heldButton === `${axis.key}:1` ? 'is-held' : ''}`}
+              disabled={!holdAllowed}
+              onPointerDown={event => startHold(event, axis.key, 1)}
+              onPointerUp={() => releaseHold(true)}
+              onPointerCancel={() => releaseHold(false)}
+            >
+              {axis.positive}
+              <small>+100%</small>
+            </button>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
 function PwmOutputGrid({
   status,
   connected,
@@ -891,7 +1532,7 @@ function PwmOutputGrid({
           const confirmed = status?.confirmed_pwm[index];
           const requested = status?.requested_pwm[index];
           const active = Number.isFinite(confirmed)
-            && Math.abs((confirmed as number) - capabilities.pwm.neutral_us) >= 5;
+            && Math.abs((confirmed as number) - capabilities.pwm.neutral_us) >= 1;
           const state = !Number.isFinite(confirmed)
             ? '确认未知'
             : !outputFresh
@@ -945,6 +1586,9 @@ export default function App() {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [estopPending, setEstopPending] = useState(false);
   const [estopGateVersion, setEstopGateVersion] = useState<number | null>(null);
+  const [activePage, setActivePage] = useState<'dashboard' | 'motion'>(() => (
+    window.location.hash === '#motion' ? 'motion' : 'dashboard'
+  ));
   const actionInFlight = useRef(false);
   const actionController = useRef<AbortController | null>(null);
   const actionGeneration = useRef(0);
@@ -953,6 +1597,19 @@ export default function App() {
   telemetryVersionRef.current = telemetryVersion;
   const linkReady = isLinkReady(connected, status);
   const controlReady = backendReady(connected, status) && capabilitiesReady;
+
+  useEffect(() => {
+    const syncPageFromHash = () => {
+      setActivePage(window.location.hash === '#motion' ? 'motion' : 'dashboard');
+    };
+    window.addEventListener('hashchange', syncPageFromHash);
+    return () => window.removeEventListener('hashchange', syncPageFromHash);
+  }, []);
+
+  const selectPage = (page: 'dashboard' | 'motion') => {
+    window.location.hash = page === 'motion' ? 'motion' : 'dashboard';
+    setActivePage(page);
+  };
 
   useEffect(() => {
     if (connected) return;
@@ -991,7 +1648,10 @@ export default function App() {
     || status?.safety_state === 5,
   );
 
-  const setError = (text: string) => setNotice({ kind: 'error', text });
+  const setError = useCallback(
+    (text: string) => setNotice({ kind: 'error', text }),
+    [],
+  );
 
   const runAction = async (
     name: string,
@@ -1070,6 +1730,21 @@ export default function App() {
       />
 
       <main className="workspace">
+        <nav className="page-tabs" aria-label="控制台页面">
+          <button
+            className={activePage === 'dashboard' ? 'is-active' : ''}
+            onClick={() => selectPage('dashboard')}
+          >
+            状态与 PWM
+          </button>
+          <button
+            className={activePage === 'motion' ? 'is-active' : ''}
+            onClick={() => selectPage('motion')}
+          >
+            运动调参
+          </button>
+        </nav>
+
         <ReadinessStrip
           status={status}
           connected={connected}
@@ -1096,22 +1771,39 @@ export default function App() {
           </div>
         )}
 
-        <div className="dashboard-grid">
-          <SystemPanel status={status} connected={connected} />
-          <SensorPanel status={status} connected={connected} />
-          <PwmPanel
-            status={status}
-            connected={connected}
-            capabilities={capabilities}
-            capabilitiesReady={capabilitiesReady}
-            safetyLocked={pwmSafetyLocked}
-            telemetryVersion={telemetryVersion}
-            onError={setError}
-            onEvent={addEvent}
-          />
-          <PwmOutputGrid status={status} connected={connected} capabilities={capabilities} />
-          <EventLog events={events} />
-        </div>
+        {activePage === 'dashboard' ? (
+          <div className="dashboard-grid">
+            <SystemPanel status={status} connected={connected} />
+            <SensorPanel status={status} connected={connected} />
+            <PwmPanel
+              status={status}
+              connected={connected}
+              capabilities={capabilities}
+              capabilitiesReady={capabilitiesReady}
+              safetyLocked={pwmSafetyLocked}
+              telemetryVersion={telemetryVersion}
+              onError={setError}
+              onEvent={addEvent}
+            />
+            <PwmOutputGrid status={status} connected={connected} capabilities={capabilities} />
+            <EventLog events={events} />
+          </div>
+        ) : (
+          <div className="dashboard-grid">
+            <MotionTuningPanel
+              status={status}
+              connected={connected}
+              capabilities={capabilities}
+              capabilitiesReady={capabilitiesReady}
+              safetyLocked={pwmSafetyLocked}
+              connectionVersion={connectionVersion}
+              onError={setError}
+              onEvent={addEvent}
+            />
+            <PwmOutputGrid status={status} connected={connected} capabilities={capabilities} />
+            <EventLog events={events} />
+          </div>
+        )}
 
         <footer className="footer-strip">
           <span>TX {status?.tx_frames ?? 0}</span>

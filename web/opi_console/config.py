@@ -20,8 +20,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 STM32_CHANNEL_COUNT = 8
 STM32_PWM_NEUTRAL_US = 1500
-STM32_PWM_MIN_US = 1300
-STM32_PWM_MAX_US = 1700
+STM32_PWM_MIN_US = 1000
+STM32_PWM_MAX_US = 2000
 STM32_MAX_TEST_DURATION_MS = 2000
 
 
@@ -150,12 +150,18 @@ class SimulationConfig(StrictConfigModel):
 class FeatureConfig(StrictConfigModel):
     manual_pwm: bool = True
     motor_mapping: bool = True
+    motion_tuning: bool = True
     sensor_stream: bool = True
     emergency_stop: bool = True
 
 
 class MotorMappingConfig(StrictConfigModel):
     file: str = "config/motor_mapping.json"
+
+
+class MotionTuningConfig(StrictConfigModel):
+    file: str = "config/motion_tuning.json"
+    sync_interval_s: float = Field(default=0.5, ge=0.1, le=10)
 
 
 class SafetyConfig(StrictConfigModel):
@@ -175,6 +181,7 @@ class AppConfig(StrictConfigModel):
     simulation: SimulationConfig = Field(default_factory=SimulationConfig)
     features: FeatureConfig = Field(default_factory=FeatureConfig)
     motor_mapping: MotorMappingConfig = Field(default_factory=MotorMappingConfig)
+    motion_tuning: MotionTuningConfig = Field(default_factory=MotionTuningConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
 
     @model_validator(mode="after")
@@ -196,6 +203,21 @@ class AppConfig(StrictConfigModel):
             "channel_count": self.pwm.channel_count,
             "pwm": self.pwm.model_dump(),
             "features": self.features.model_dump(),
+            "motion_tuning": {
+                "axis_order": [
+                    "surge", "sway", "heave", "roll", "pitch", "yaw",
+                ],
+                "gain_min": 0.0,
+                "gain_max": 2.0,
+                "axis_max_output_min": 0.0,
+                "axis_max_output_max": 1.0,
+                "global_multiplier_min": 0.0,
+                "global_multiplier_max": 1.0,
+                "pwm_slew_rate_min_us_per_s": 100,
+                "pwm_slew_rate_max_us_per_s": 5000,
+                "command_timeout_min_ms": 200,
+                "command_timeout_max_ms": 2000,
+            },
             "telemetry": {
                 "status_hz": self.telemetry.status_hz,
                 "sensors_hz": self.telemetry.sensors_hz,
