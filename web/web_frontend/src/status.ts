@@ -20,6 +20,41 @@ export const SAFETY_STATE_LABELS: Record<number, string> = {
 
 export type RequestState = 'idle' | 'pending' | 'confirmed' | 'rejected' | 'timeout' | 'unknown';
 
+export interface GamepadCommand {
+  surge: number;
+  sway: number;
+  heave: number;
+  roll: number;
+  pitch: number;
+  yaw: number;
+}
+
+export interface GamepadStatus {
+  client_connected: boolean;
+  lease_session_id: string | null;
+  lease_active: boolean;
+  gamepad_connected: boolean;
+  control_enabled: boolean;
+  eligible: boolean;
+  eligibility_reason: string;
+  axes: number[];
+  buttons: number[];
+  mapped_command: GamepadCommand;
+  heave_conflict: boolean;
+  last_sequence: number | null;
+  command_age_ms: number | null;
+  last_forwarded_sequence: number | null;
+  last_stm32_ack: boolean;
+  last_error: string | null;
+  last_disconnect_reason: string | null;
+  rejected_messages: number;
+  duplicate_messages: number;
+  resume_requires_neutral: boolean;
+  zero_timeout_ms: number;
+  disconnect_timeout_ms: number;
+  send_hz: number;
+}
+
 export interface RobotStatus {
   mode: string;
   serial_connected: boolean;
@@ -40,6 +75,8 @@ export interface RobotStatus {
   estop_locked: boolean;
   backend_motion_inhibited: boolean;
   backend_motion_inhibit_reason: string | null;
+  control_mode: string;
+  gamepad: GamepadStatus;
   pwm: number[];
   confirmed_pwm: number[];
   requested_pwm: number[];
@@ -109,6 +146,57 @@ function vector3(value: unknown): number[] {
   return [0, 1, 2].map(index => asNumber(value[index], NaN));
 }
 
+function finiteVector(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => asNumber(item, NaN));
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function normalizeGamepadCommand(value: unknown): GamepadCommand {
+  const source = isRecord(value) ? value : {};
+  return {
+    surge: asNumber(source.surge),
+    sway: asNumber(source.sway),
+    heave: asNumber(source.heave),
+    roll: asNumber(source.roll),
+    pitch: asNumber(source.pitch),
+    yaw: asNumber(source.yaw),
+  };
+}
+
+function normalizeGamepad(value: unknown): GamepadStatus {
+  const source = isRecord(value) ? value : {};
+  return {
+    client_connected: asBool(source.client_connected),
+    lease_session_id: asOptionalString(source.lease_session_id),
+    lease_active: asBool(source.lease_active),
+    gamepad_connected: asBool(source.gamepad_connected),
+    control_enabled: asBool(source.control_enabled),
+    eligible: asBool(source.eligible),
+    eligibility_reason: asOptionalString(source.eligibility_reason)
+      ?? 'no_gamepad_frame',
+    axes: finiteVector(source.axes),
+    buttons: finiteVector(source.buttons),
+    mapped_command: normalizeGamepadCommand(source.mapped_command),
+    heave_conflict: asBool(source.heave_conflict),
+    last_sequence: nullableNumber(source.last_sequence),
+    command_age_ms: nullableNumber(source.command_age_ms),
+    last_forwarded_sequence: nullableNumber(source.last_forwarded_sequence),
+    last_stm32_ack: asBool(source.last_stm32_ack),
+    last_error: asOptionalString(source.last_error),
+    last_disconnect_reason: asOptionalString(source.last_disconnect_reason),
+    rejected_messages: asNumber(source.rejected_messages),
+    duplicate_messages: asNumber(source.duplicate_messages),
+    resume_requires_neutral: asBool(source.resume_requires_neutral),
+    zero_timeout_ms: asNumber(source.zero_timeout_ms, 300),
+    disconnect_timeout_ms: asNumber(source.disconnect_timeout_ms, 1000),
+    send_hz: asNumber(source.send_hz, 50),
+  };
+}
+
 function normalizeRequestState(value: unknown): RequestState {
   switch (value) {
     case 'idle':
@@ -158,6 +246,8 @@ export function normalizeStatus(raw: unknown): RobotStatus {
     backend_motion_inhibited: asBool(source.backend_motion_inhibited, true),
     backend_motion_inhibit_reason: asOptionalString(
       source.backend_motion_inhibit_reason),
+    control_mode: asOptionalString(source.control_mode) ?? 'UNKNOWN',
+    gamepad: normalizeGamepad(source.gamepad),
     pwm: confirmedPwm,
     confirmed_pwm: confirmedPwm,
     requested_pwm: requestedPwm,

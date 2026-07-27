@@ -227,6 +227,194 @@ try {
   await page.getByRole('button', { name: '上锁并回中' }).click();
   await page.getByText('未解锁', { exact: true }).first().waitFor();
 
+  await page.getByRole('button', { name: '手柄控制', exact: true }).click();
+  const gamepadPanel = page.locator('section.panel').filter({
+    has: page.getByRole('heading', { name: '手柄控制' }),
+  });
+  await gamepadPanel.waitFor();
+  await page.evaluate(() => new Promise((resolve, reject) => {
+    const socket = new WebSocket(
+      `ws://${globalThis.location.host}/ws/control/gamepad`,
+    );
+    const state = {
+      socket,
+      config: null,
+      sequence: 0,
+      axes: [0, 0, 0, 0, 0, 0],
+      buttons: [0, 0, 0, 0],
+      timer: null,
+      lastAck: null,
+      send: null,
+    };
+    globalThis.__syntheticGamepad = state;
+    const shape = (raw, invert) => {
+      const magnitude = Math.abs(raw);
+      if (magnitude <= state.config.deadzone) return 0;
+      const normalized = (
+        (magnitude - state.config.deadzone)
+        / (1 - state.config.deadzone)
+      );
+      const value = Math.sign(raw) * normalized ** state.config.expo;
+      return invert ? -value : value;
+    };
+    state.send = () => {
+      if (socket.readyState !== WebSocket.OPEN || !state.config) return;
+      const surge = shape(
+        state.axes[1], state.config.surge_invert,
+      ) * state.config.surge_scale * state.config.global_scale;
+      const sway = shape(
+        state.axes[0], state.config.sway_invert,
+      ) * state.config.sway_scale * state.config.global_scale;
+      const yaw = shape(
+        state.axes[4], state.config.yaw_invert,
+      ) * state.config.yaw_scale * state.config.global_scale;
+      const a = state.buttons[0] === 1;
+      const y = state.buttons[3] === 1;
+      const heave = a === y ? 0 : (
+        (a ? 1 : -1)
+        * state.config.heave_button_strength
+        * state.config.heave_scale
+        * state.config.global_scale
+      );
+      state.sequence += 1;
+      socket.send(JSON.stringify({
+        type: 'gamepad_state',
+        version: 1,
+        session_id: 'browser_gamepad_e2e',
+        sequence: state.sequence,
+        client_time_ns: Math.trunc(performance.now() * 1_000_000),
+        control_enabled: true,
+        gamepad_connected: true,
+        axes: state.axes,
+        buttons: state.buttons,
+        hats: [[0, 0]],
+        device: { name: 'Browser synthetic gamepad' },
+        mapped_command: {
+          surge,
+          sway,
+          heave,
+          roll: 0,
+          pitch: 0,
+          yaw,
+        },
+      }));
+    };
+    socket.onerror = () => reject(new Error('synthetic gamepad failed'));
+    socket.onmessage = event => {
+      const message = JSON.parse(event.data);
+      if (message.type === 'gamepad_hello') {
+        state.config = message.mapping_config;
+        state.send();
+        state.timer = setInterval(state.send, 25);
+        resolve();
+      } else if (message.type === 'gamepad_ack') {
+        state.lastAck = message;
+      }
+    };
+  }));
+
+  await gamepadPanel.locator('.metric').filter({
+    hasText: '电脑转发程序',
+  }).getByText('已连接', { exact: true }).waitFor();
+  await gamepadPanel.locator('.metric').filter({
+    hasText: 'USB 手柄',
+  }).getByText('已连接', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '解锁' }).click();
+  await gamepadPanel.getByText('可进入 GAMEPAD 模式', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '进入 GAMEPAD' }).click();
+  await page.getByText('控制模式 GAMEPAD', { exact: true }).waitFor();
+
+  await page.evaluate(() => {
+    globalThis.__syntheticGamepad.axes[1] = -1;
+  });
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return status.control_mode === 'GAMEPAD'
+      && status.gamepad.mapped_command.surge > 0
+      && status.confirmed_pwm.some(value => value !== 1500);
+  }, 4000);
+  await gamepadPanel.getByText('-1.000', { exact: true }).waitFor();
+
+  await page.evaluate(() => {
+    clearInterval(globalThis.__syntheticGamepad.timer);
+    globalThis.__syntheticGamepad.timer = null;
+  });
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return status.control_mode === 'GAMEPAD'
+      && status.gamepad.resume_requires_neutral
+      && status.confirmed_pwm.every(value => value === 1500);
+  }, 800);
+
+  await page.evaluate(() => {
+    const state = globalThis.__syntheticGamepad;
+    state.send();
+    state.timer = setInterval(state.send, 25);
+  });
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return status.gamepad.command_age_ms < 300
+      && status.gamepad.resume_requires_neutral
+      && status.confirmed_pwm.every(value => value === 1500);
+  }, 600);
+
+  await page.evaluate(() => {
+    globalThis.__syntheticGamepad.axes[1] = 0;
+  });
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return !status.gamepad.resume_requires_neutral;
+  }, 600);
+
+  await page.evaluate(() => {
+    globalThis.__syntheticGamepad.buttons[0] = 1;
+  });
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    const vertical = [1, 2, 5, 6].map(
+      channel => status.confirmed_pwm[channel],
+    );
+    return status.gamepad.mapped_command.heave > 0
+      && vertical.every(value => value > 1500)
+      && new Set(vertical).size === 1;
+  }, 4000);
+
+  await page.evaluate(() => {
+    const state = globalThis.__syntheticGamepad;
+    state.buttons[0] = 0;
+    state.buttons[3] = 1;
+  });
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    const vertical = [1, 2, 5, 6].map(
+      channel => status.confirmed_pwm[channel],
+    );
+    return status.gamepad.mapped_command.heave < 0
+      && vertical.every(value => value < 1500)
+      && new Set(vertical).size === 1;
+  }, 4000);
+
+  await page.evaluate(() => {
+    const state = globalThis.__syntheticGamepad;
+    state.buttons[3] = 0;
+    state.axes[4] = 1;
+  });
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return status.gamepad.mapped_command.yaw > 0
+      && [0, 3, 4, 7].every(
+        channel => status.confirmed_pwm[channel] > 1500,
+      );
+  }, 4000);
+
+  await page.getByRole('button', { name: '退出并上锁' }).click();
+  await page.getByText('未解锁', { exact: true }).first().waitFor();
+  await page.evaluate(() => {
+    const state = globalThis.__syntheticGamepad;
+    if (state.timer) clearInterval(state.timer);
+    state.socket.close();
+  });
+
   await stopBackend();
   await page.getByText('WebSocket 断开', { exact: true }).waitFor({ timeout: 8000 });
   await page.getByText('WebSocket 已断开，页面离线，所有控制已锁定', {

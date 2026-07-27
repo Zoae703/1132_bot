@@ -28,6 +28,7 @@ function validCapabilities() {
       manual_pwm: true,
       motor_mapping: true,
       motion_tuning: true,
+      gamepad_control: true,
       sensor_stream: true,
       emergency_stop: true,
     },
@@ -44,6 +45,25 @@ function validCapabilities() {
       command_timeout_min_ms: 200,
       command_timeout_max_ms: 2000,
     },
+    gamepad: {
+      axis_count: 6,
+      min_button_count: 4,
+      max_button_count: 32,
+      send_hz: 50,
+      zero_timeout_ms: 300,
+      disconnect_timeout_ms: 1000,
+      deadzone: 0.08,
+      expo: 1,
+      global_scale: 0.15,
+      surge_scale: 1,
+      sway_scale: 1,
+      heave_scale: 1,
+      yaw_scale: 1,
+      heave_button_strength: 0.1,
+      surge_invert: true,
+      sway_invert: false,
+      yaw_invert: false,
+    },
     telemetry: {
       status_hz: 5,
       sensors_hz: 5,
@@ -59,6 +79,8 @@ test('locked capabilities cannot command movement', () => {
   assert.equal(LOCKED_CAPABILITIES.pwm.min_test_us, 1500);
   assert.equal(LOCKED_CAPABILITIES.pwm.max_test_us, 1500);
   assert.equal(LOCKED_CAPABILITIES.features.motion_tuning, false);
+  assert.equal(LOCKED_CAPABILITIES.features.gamepad_control, false);
+  assert.equal(LOCKED_CAPABILITIES.gamepad.global_scale, 0);
 });
 
 test('valid backend capabilities are normalized', () => {
@@ -95,4 +117,11 @@ test('neutral, PWM bounds, and duration invariants are enforced', () => {
   const invalidTuning = validCapabilities();
   invalidTuning.motion_tuning.command_timeout_min_ms = 2500;
   assert.throws(() => normalizeCapabilities(invalidTuning), /运动调参/);
+
+  const invalidGamepadTimeout = validCapabilities();
+  invalidGamepadTimeout.gamepad.disconnect_timeout_ms = 200;
+  assert.throws(
+    () => normalizeCapabilities(invalidGamepadTimeout),
+    /手柄能力配置/,
+  );
 });

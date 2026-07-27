@@ -878,6 +878,102 @@ button {
   opacity: 0.38;
 }
 
+.gamepad-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.gamepad-data-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gamepad-data-block h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.gamepad-axis-list {
+  display: grid;
+  gap: 6px;
+}
+
+.gamepad-axis-list > div {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto;
+  gap: 12px;
+  padding: 7px 9px;
+  background: rgba(8, 17, 24, 0.42);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gamepad-axis-list strong,
+.gamepad-command-grid strong {
+  color: #eaf2f7;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.gamepad-button-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.gamepad-button-list span {
+  padding: 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.gamepad-button-list span.is-pressed {
+  border-color: rgba(54, 194, 180, 0.62);
+  background: rgba(54, 194, 180, 0.12);
+  color: #9ce4dc;
+}
+
+.gamepad-command-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.gamepad-command-grid > div {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border-left: 2px solid #315067;
+  background: rgba(8, 17, 24, 0.42);
+}
+
+.gamepad-command-grid span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.gamepad-command-grid strong {
+  font-size: 17px;
+}
+
+.gamepad-config-strip {
+  display: flex;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
 .event-log {
   height: 180px;
   overflow: auto;
@@ -932,8 +1028,14 @@ button {
   }
 
   .global-tuning-grid,
-  .axis-control-grid {
+  .axis-control-grid,
+  .gamepad-data-grid {
     grid-template-columns: 1fr;
+  }
+
+  .gamepad-metrics,
+  .gamepad-command-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .channel-grid,
@@ -965,7 +1067,9 @@ button {
   .metric-grid--two,
   .sensor-grid,
   .channel-grid,
-  .output-grid {
+  .output-grid,
+  .gamepad-metrics,
+  .gamepad-command-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

@@ -151,6 +151,7 @@ class FeatureConfig(StrictConfigModel):
     manual_pwm: bool = True
     motor_mapping: bool = True
     motion_tuning: bool = True
+    gamepad_control: bool = True
     sensor_stream: bool = True
     emergency_stop: bool = True
 
@@ -162,6 +163,42 @@ class MotorMappingConfig(StrictConfigModel):
 class MotionTuningConfig(StrictConfigModel):
     file: str = "config/motion_tuning.json"
     sync_interval_s: float = Field(default=0.5, ge=0.1, le=10)
+
+
+class GamepadConfig(StrictConfigModel):
+    axis_count: int = 6
+    min_button_count: int = 4
+    max_button_count: int = 32
+    send_hz: float = Field(default=50.0, ge=20.0, le=100.0)
+    zero_timeout_ms: int = Field(default=300, ge=100, le=1000)
+    disconnect_timeout_ms: int = Field(default=1000, ge=300, le=5000)
+    deadzone: float = Field(default=0.08, ge=0.0, lt=0.5)
+    expo: float = Field(default=1.0, ge=1.0, le=3.0)
+    global_scale: float = Field(default=0.15, ge=0.0, le=1.0)
+    surge_scale: float = Field(default=1.0, ge=0.0, le=1.0)
+    sway_scale: float = Field(default=1.0, ge=0.0, le=1.0)
+    heave_scale: float = Field(default=1.0, ge=0.0, le=1.0)
+    yaw_scale: float = Field(default=1.0, ge=0.0, le=1.0)
+    heave_button_strength: float = Field(default=0.10, ge=0.0, le=1.0)
+    # Target-controller signs: forward=-axis0, right=+axis1 and
+    # clockwise/right=+axis4. Verify raw values after changing controllers.
+    surge_invert: bool = True
+    sway_invert: bool = False
+    yaw_invert: bool = False
+
+    @model_validator(mode="after")
+    def validate_layout_and_timeouts(self):
+        if self.axis_count != 6:
+            raise ValueError("gamepad.axis_count must remain 6")
+        if self.min_button_count < 4:
+            raise ValueError("gamepad.min_button_count must be at least 4")
+        if self.max_button_count < self.min_button_count:
+            raise ValueError(
+                "gamepad.max_button_count must be >= min_button_count")
+        if self.disconnect_timeout_ms <= self.zero_timeout_ms:
+            raise ValueError(
+                "gamepad.disconnect_timeout_ms must exceed zero_timeout_ms")
+        return self
 
 
 class SafetyConfig(StrictConfigModel):
@@ -182,6 +219,7 @@ class AppConfig(StrictConfigModel):
     features: FeatureConfig = Field(default_factory=FeatureConfig)
     motor_mapping: MotorMappingConfig = Field(default_factory=MotorMappingConfig)
     motion_tuning: MotionTuningConfig = Field(default_factory=MotionTuningConfig)
+    gamepad: GamepadConfig = Field(default_factory=GamepadConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
 
     @model_validator(mode="after")
@@ -218,6 +256,7 @@ class AppConfig(StrictConfigModel):
                 "command_timeout_min_ms": 200,
                 "command_timeout_max_ms": 2000,
             },
+            "gamepad": self.gamepad.model_dump(),
             "telemetry": {
                 "status_hz": self.telemetry.status_hz,
                 "sensors_hz": self.telemetry.sensors_hz,

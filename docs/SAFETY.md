@@ -29,6 +29,10 @@
 - Requested PWM is never displayed as confirmed until a status report arrives
 - Ordinary commands are single-flight; ESTOP has an independent priority path
 - Startup and shutdown both request confirmed neutral and DISARM
+- MOTOR_TEST, WEB_MOTION, and GAMEPAD use one exclusive ControlArbiter
+- One gamepad WebSocket lease; duplicate or out-of-order frames are discarded
+- Gamepad 300ms timeout sends zero and requires center before resuming
+- Gamepad 1000ms timeout or disconnect exits the mode and DISARMs
 
 ### Layer 3: Physical Safety
 - Power-on default: all PWM = 1500us
@@ -68,6 +72,9 @@
 | Orange Pi power loss | Heartbeat stops | Same as above |
 | STM32 I2C bus failure | PCA9685 write error | → ESTOP |
 | Last WebSocket client disconnect | Backend connection tracking | Immediate neutral, exit manual mode, DISARM; serial heartbeat continues for monitoring |
+| Gamepad frame age reaches 300ms | Gamepad command pump | Six-axis zero; nonzero recovery locked until controls center |
+| Gamepad frame age reaches 1000ms | Gamepad command pump | Exit GAMEPAD, zero, disable body control, DISARM |
+| Gamepad unplug/client close/network socket close | Lease WebSocket | Immediate safe GAMEPAD shutdown and DISARM |
 
 ## Pre-Flight Checklist
 

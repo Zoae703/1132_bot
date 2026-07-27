@@ -22,6 +22,7 @@ from opi_console.config import AppConfig, coerce_config
 from web_backend.api_routes import create_api_router
 from web_backend.ws_manager import WebSocketManager
 from web_backend.control_state import ControlState
+from web_backend.gamepad_control import GamepadControlService
 
 logger = logging.getLogger("opi_console.web")
 
@@ -54,17 +55,26 @@ def create_app(proxy: Stm32Proxy, transport: SerialTransport,
     """
     app_config = coerce_config(config or proxy.config)
     control_state = ControlState()
+    gamepad_service = GamepadControlService(
+        proxy, control_state, config=app_config)
     ws_manager = WebSocketManager(
-        proxy, transport, control_state=control_state, config=app_config)
+        proxy,
+        transport,
+        control_state=control_state,
+        config=app_config,
+        gamepad_service=gamepad_service,
+    )
     startup_mono = time.monotonic()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await proxy.start_background_tasks()
+        await gamepad_service.start()
         await ws_manager.start()
         try:
             yield
         finally:
+            await gamepad_service.stop()
             await ws_manager.stop()
             await proxy.stop_background_tasks()
 
@@ -78,6 +88,7 @@ def create_app(proxy: Stm32Proxy, transport: SerialTransport,
     app.state.control_state = control_state
     app.state.ws_manager = ws_manager
     app.state.proxy = proxy
+    app.state.gamepad_service = gamepad_service
 
     # CORS (allow web frontend dev server on different port)
     if app_config.web.cors_origins:
@@ -96,6 +107,7 @@ def create_app(proxy: Stm32Proxy, transport: SerialTransport,
         ws_manager,
         control_state=control_state,
         config=app_config,
+        gamepad_service=gamepad_service,
     )
     app.include_router(api_router, prefix="/api")
 
@@ -113,6 +125,23 @@ def create_app(proxy: Stm32Proxy, transport: SerialTransport,
             logger.exception("WebSocket handler failed")
             await ws_manager.disconnect(ws)
 
+    @app.websocket("/ws/control/gamepad")
+    async def ws_gamepad(ws: WebSocket):
+        if not await gamepad_service.connect(ws):
+            return
+        disconnect_reason = "gamepad_websocket_disconnected"
+        try:
+            while True:
+                data = await ws.receive_text()
+                await gamepad_service.handle_message(ws, data)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            disconnect_reason = "gamepad_websocket_error"
+            logger.exception("Gamepad WebSocket handler failed")
+        finally:
+            await gamepad_service.disconnect(ws, disconnect_reason)
+
     # Health check
     @app.get("/health")
     async def health():
@@ -126,6 +155,7 @@ def create_app(proxy: Stm32Proxy, transport: SerialTransport,
             "status_stale": state.status_stale,
             "sensors_stale": state.sensors_stale,
             "backend_motion_inhibited": control_state.motion_inhibited,
+            "control_mode": control_state.arbiter.mode.value,
         }
 
     # Prevent the root SPA mount from converting unknown API routes to HTML.

@@ -75,7 +75,7 @@ struct ThrusterConfig {
     // authoritative PWM polarity; propeller hand and rotation are metadata.
     Vector3 positive_force;
 
-    // Existing controller calibration, now bound to the physical channel.
+    // Optional per-channel calibration, bound to the physical channel.
     int16_t neutral_trim_us;
     uint16_t deadzone_compensation_us;
 };
@@ -88,34 +88,34 @@ inline constexpr std::array<ThrusterConfig, kThrusterCount> kThrusters{{
      Position::RearRight, Orientation::HorizontalDiagonal,
      PropellerHand::Normal, RotationDirection::Counterclockwise,
      {-0.707F, -0.707F, 0.0F}, 0, 50U},
-    {1U, "vertical_rear_right",
-     Position::RearRight, Orientation::Vertical,
+    {1U, "vertical_rear_left",
+     Position::RearLeft, Orientation::Vertical,
      PropellerHand::Normal, RotationDirection::Counterclockwise,
      {0.0F, 0.0F, 1.0F}, 0, 50U},
     {2U, "vertical_front_right",
      Position::FrontRight, Orientation::Vertical,
      PropellerHand::Normal, RotationDirection::Counterclockwise,
-     {0.0F, 0.0F, 1.0F}, -100, 50U},
-    {3U, "horizontal_front_right",
-     Position::FrontRight, Orientation::HorizontalDiagonal,
+     {0.0F, 0.0F, 1.0F}, 0, 50U},
+    {3U, "horizontal_front_left",
+     Position::FrontLeft, Orientation::HorizontalDiagonal,
      PropellerHand::Normal, RotationDirection::Counterclockwise,
      {-0.707F, 0.707F, 0.0F}, 0, 50U},
-    {4U, "horizontal_front_left",
-     Position::FrontLeft, Orientation::HorizontalDiagonal,
+    {4U, "horizontal_front_right",
+     Position::FrontRight, Orientation::HorizontalDiagonal,
      PropellerHand::Reverse, RotationDirection::Clockwise,
-     {0.707F, 0.707F, 0.0F}, 0, 50U},
+     {0.707F, -0.707F, 0.0F}, 0, 50U},
     {5U, "vertical_front_left",
      Position::FrontLeft, Orientation::Vertical,
      PropellerHand::Reverse, RotationDirection::Clockwise,
-     {0.0F, 0.0F, -1.0F}, 90, 50U},
-    {6U, "vertical_rear_left",
-     Position::RearLeft, Orientation::Vertical,
+     {0.0F, 0.0F, -1.0F}, 0, 50U},
+    {6U, "vertical_rear_right",
+     Position::RearRight, Orientation::Vertical,
      PropellerHand::Reverse, RotationDirection::Clockwise,
      {0.0F, 0.0F, -1.0F}, 0, 50U},
     {7U, "horizontal_rear_left",
      Position::RearLeft, Orientation::HorizontalDiagonal,
      PropellerHand::Reverse, RotationDirection::Clockwise,
-     {0.707F, -0.707F, 0.0F}, 0, 50U},
+     {0.707F, 0.707F, 0.0F}, 0, 50U},
 }};
 
 constexpr Vector3 position_vector(Position position)

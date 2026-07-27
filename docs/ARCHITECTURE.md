@@ -4,8 +4,8 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  PC Browser / Tablet                                    │
-│  http://orange-pi:8000                                  │
+│  PC Browser / Tablet + Linux USB gamepad forwarder      │
+│  HTTP telemetry/control + /ws/control/gamepad           │
 └──────────────────┬──────────────────────────────────────┘
                    │ Ethernet / WiFi
                    ▼
@@ -13,7 +13,7 @@
 │  Orange Pi                                              │
 │  ┌───────────────────┐  ┌──────────────────────────────┐│
 │  │ opi_console/      │  │ web_backend/ (FastAPI)       ││
-│  │ serial_transport  │◄─┤ api_routes + ws_manager      ││
+│  │ serial_transport  │◄─┤ API + WS + ControlArbiter    ││
 │  │ stm32_proxy       │  │                              ││
 │  │ simulated_stm32   │  │ web_frontend/ (React+Vite)   ││
 │  └────────┬──────────┘  └──────────────────────────────┘│
@@ -70,6 +70,30 @@
    the backend serializes `SET_ALL_NEUTRAL`, `EXIT_MANUAL` when applicable, and
    `DISARM`. A new browser connection does not cancel an in-progress safety
    transition.
+
+10. **USB gamepad → existing six-axis mixer**: the Linux forwarder sends raw
+    inputs and a mapped BodyCommand to `/ws/control/gamepad`. The backend
+    independently validates the map, keeps only the newest frame, acquires the
+    exclusive `GAMEPAD` ControlArbiter mode, and periodically emits the existing
+    `SET_BODY_COMMAND`. STM32 MotorControl remains the only 6-DOF-to-8-thruster
+    mixer.
+
+11. **Gamepad timeout safety**: after 300ms without a new frame the backend
+    sends a zero BodyCommand and requires a centered frame before accepting
+    movement again. After 1000ms, USB disconnect, disabled client control, or
+    WebSocket disconnect, it exits body control and DISARMs.
+
+## Operator Control Arbitration
+
+The Orange Pi has one process-wide motor-control owner:
+
+```text
+IDLE -> MOTOR_TEST | WEB_MOTION | GAMEPAD
+```
+
+Only `IDLE` may transition into a control mode. DISARM, ESTOP, service
+disconnect, or a completed mode exit returns ownership to `IDLE`. The gamepad
+cannot ARM or RESET_ESTOP and never sends channel PWM.
 
 ## Safety State Machine
 

@@ -60,6 +60,7 @@ features:
   manual_pwm: true
   motor_mapping: true
   motion_tuning: true
+  gamepad_control: true
   sensor_stream: true
   emergency_stop: true
 
@@ -69,6 +70,27 @@ motor_mapping:
 motion_tuning:
   file: config/motion_tuning.json
   sync_interval_s: 0.5
+
+gamepad:
+  axis_count: 6
+  min_button_count: 4
+  max_button_count: 32
+  send_hz: 50
+  zero_timeout_ms: 300
+  disconnect_timeout_ms: 1000
+  deadzone: 0.08
+  expo: 1.0
+  global_scale: 0.15
+  surge_scale: 1.0
+  sway_scale: 1.0
+  heave_scale: 1.0
+  yaw_scale: 1.0
+  heave_button_strength: 0.10
+  # Target-controller signs: forward=-axis0, right=+axis1,
+  # clockwise/right=+axis4. Recheck the forwarder's raw axes after replacement.
+  surge_invert: true
+  sway_invert: false
+  yaw_invert: false
 
 safety:
   disconnect_command_timeout_s: 1.5

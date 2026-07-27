@@ -465,7 +465,12 @@ function Header({
   onEstop: () => void;
 }) {
   const busy = Boolean(pendingAction);
-  const canArm = Boolean(status && status.safety_state === 0 && status.estop_locked === false);
+  const canArm = Boolean(
+    status
+    && status.safety_state === 0
+    && status.estop_locked === false
+    && status.control_mode === 'IDLE',
+  );
   const canDisarm = Boolean(status && (
     motionInhibited
     || (status.safety_state !== 0 && status.safety_state !== 5)
@@ -485,6 +490,10 @@ function Header({
       <div className="topbar__status">
         <StatusBadge label={connected ? 'WebSocket 已连接' : 'WebSocket 断开'} tone={connected ? 'ok' : 'danger'} />
         <StatusBadge label={status?.safety_state_label ?? '等待数据'} tone={stateTone(status?.safety_state)} />
+        <StatusBadge
+          label={`控制模式 ${status?.control_mode ?? 'UNKNOWN'}`}
+          tone={status?.control_mode === 'IDLE' ? 'muted' : 'manual'}
+        />
       </div>
 
       <div className="topbar__actions">
@@ -662,7 +671,11 @@ function PwmPanel({
     safetyLocked,
     requestPending: testing,
   });
-  const canTest = availability.canTest && capabilities.features.manual_pwm;
+  const canTest = (
+    availability.canTest
+    && capabilities.features.manual_pwm
+    && status?.control_mode === 'MOTOR_TEST'
+  );
   const canNeutral = availability.canNeutral;
   const channels = useMemo(
     () => Array.from({ length: capabilities.channel_count }, (_, index) => index),
@@ -763,6 +776,10 @@ function PwmPanel({
     if (!capabilitiesReady) return '安全能力配置不可用';
     if (!capabilities.features.manual_pwm) return '后端未启用手动 PWM 能力';
     if (safetyLocked || status.estop_locked) return '急停或全局安全锁已启用';
+    if (
+      status.control_mode !== 'IDLE'
+      && status.control_mode !== 'MOTOR_TEST'
+    ) return `${status.control_mode} 正在占用运动控制`;
     if (status.safety_state === 0) return '请先解锁';
     if (status.safety_state === 1) return '请进入手动测试';
     if (status.safety_state === 3) return '可进行单通道短脉冲测试';
@@ -890,7 +907,17 @@ function PwmPanel({
         </div>
         <div className="control-summary__actions">
           {status.safety_state === 1 && (
-            <button className="btn btn--primary" disabled={!motionReady || !capabilitiesReady || safetyLocked || testing} onClick={enterManual}>
+            <button
+              className="btn btn--primary"
+              disabled={
+                !motionReady
+                || !capabilitiesReady
+                || safetyLocked
+                || testing
+                || status.control_mode !== 'IDLE'
+              }
+              onClick={enterManual}
+            >
               进入手动测试
             </button>
           )}
@@ -1121,12 +1148,15 @@ function MotionTuningPanel({
   );
   const canSave = tuningReady && stopped && !safetyLocked && !loading && !saving && !modeBusy;
   const modeActive = Boolean(
-    status?.safety_state === 2 && status.body_control_enabled,
+    status?.safety_state === 2
+    && status.body_control_enabled
+    && status.control_mode === 'WEB_MOTION',
   );
   modeActiveRef.current = modeActive;
   const canEnable = Boolean(
     tuningReady
     && status?.safety_state === 1
+    && status?.control_mode === 'IDLE'
     && !safetyLocked
     && !modeBusy,
   );
@@ -1503,6 +1533,277 @@ function MotionTuningPanel({
   );
 }
 
+function GamepadPanel({
+  status,
+  connected,
+  capabilities,
+  capabilitiesReady,
+  safetyLocked,
+  onError,
+  onEvent,
+}: {
+  status: RobotStatus | null;
+  connected: boolean;
+  capabilities: Capabilities;
+  capabilitiesReady: boolean;
+  safetyLocked: boolean;
+  onError: (msg: string) => void;
+  onEvent: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const gamepad = status?.gamepad;
+  const active = status?.control_mode === 'GAMEPAD';
+  const neutralInput = Boolean(gamepad && Object.values(
+    gamepad.mapped_command,
+  ).every(value => Math.abs(value) < 1e-7));
+  const neutralPwm = Boolean(
+    status
+    && status.confirmed_pwm.length === capabilities.channel_count
+    && status.confirmed_pwm.every(
+      value => value === capabilities.pwm.neutral_us),
+  );
+  const freshInput = Boolean(
+    gamepad
+    && gamepad.command_age_ms !== null
+    && gamepad.command_age_ms < gamepad.zero_timeout_ms,
+  );
+  const canEnter = Boolean(
+    connected
+    && capabilitiesReady
+    && capabilities.features.gamepad_control
+    && status
+    && status.stm32_online
+    && !status.status_stale
+    && status.safety_state === 1
+    && status.control_mode === 'IDLE'
+    && !safetyLocked
+    && gamepad?.client_connected
+    && gamepad.lease_active
+    && gamepad.gamepad_connected
+    && gamepad.control_enabled
+    && freshInput
+    && neutralInput
+    && neutralPwm
+    && !busy,
+  );
+
+  const readiness = (() => {
+    if (!connected || !status) return '等待网页遥测连接';
+    if (!capabilitiesReady || !capabilities.features.gamepad_control) {
+      return '手柄能力配置不可用';
+    }
+    if (active) return 'GAMEPAD 正在控制六轴运动';
+    if (status.control_mode !== 'IDLE') {
+      return `${status.control_mode} 正在占用运动控制`;
+    }
+    if (!gamepad?.client_connected) return '等待电脑转发程序连接';
+    if (!gamepad.gamepad_connected) return '等待 USB 手柄';
+    if (!gamepad.control_enabled) return '电脑端“控制开启”尚未打开';
+    if (status.safety_state !== 1) return '请先在网页顶部解锁';
+    if (!neutralPwm) return '8 路 PWM 尚未确认回中';
+    if (!neutralInput) return '请将摇杆回中并松开 A/Y';
+    if (!freshInput) return '手柄数据已超时';
+    return '可进入 GAMEPAD 模式';
+  })();
+
+  const runMode = async (path: string, message: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await apiPost(path);
+      onEvent(message);
+    } catch (error) {
+      onError(
+        `${message}失败：${
+          error instanceof Error ? error.message : '未知错误'
+        }`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const axisLabels = [
+    'axis 0 左杆左右',
+    'axis 1 左杆上下',
+    'axis 2 左扳机',
+    'axis 3 右杆上下（未使用）',
+    'axis 4 右杆左右',
+    'axis 5 右扳机',
+  ];
+  const buttonLabels = ['A', 'B（保留）', 'X（保留）', 'Y'];
+  const commandAxes: Array<[MotionAxis, string]> = [
+    ['surge', '纵向 surge'],
+    ['sway', '横向 sway'],
+    ['heave', '垂向 heave'],
+    ['roll', '横滚 roll'],
+    ['pitch', '俯仰 pitch'],
+    ['yaw', '偏航 yaw'],
+  ];
+  const ageTone = gamepad?.command_age_ms === null
+    || gamepad?.command_age_ms === undefined
+    ? 'muted'
+    : gamepad.command_age_ms >= gamepad.disconnect_timeout_ms
+      ? 'danger'
+      : gamepad.command_age_ms >= gamepad.zero_timeout_ms
+        ? 'warn'
+        : 'good';
+
+  return (
+    <Panel title="手柄控制" eyebrow="GAMEPAD" className="panel--wide">
+      <div className="motion-toolbar">
+        <div>
+          <div className="control-summary__label">控制状态</div>
+          <div className={`control-summary__value ${canEnter || active ? 'is-ready' : ''}`}>
+            {readiness}
+          </div>
+        </div>
+        <div className="control-summary__actions">
+          {!active && (
+            <button
+              className="btn btn--primary"
+              disabled={!canEnter}
+              onClick={() => void runMode(
+                '/api/gamepad/enable',
+                'GAMEPAD 模式已启用',
+              )}
+            >
+              {busy ? '处理中' : '进入 GAMEPAD'}
+            </button>
+          )}
+          {active && (
+            <button
+              className="btn btn--warning"
+              disabled={busy}
+              onClick={() => void runMode(
+                '/api/gamepad/disable',
+                'GAMEPAD 已退出并上锁',
+              )}
+            >
+              {busy ? '处理中' : '退出并上锁'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {gamepad?.heave_conflict && (
+        <div className="inline-warning">
+          A 与 Y 同时按下，垂向命令已强制归零。
+        </div>
+      )}
+      {gamepad?.resume_requires_neutral && (
+        <div className="inline-warning">
+          300ms 输入超时已触发。必须先将全部运动输入回中，才会接受后续非零命令。
+        </div>
+      )}
+
+      <div className="gamepad-metrics">
+        <Metric
+          label="电脑转发程序"
+          value={gamepad?.client_connected ? '已连接' : '未连接'}
+          tone={gamepad?.client_connected ? 'good' : 'danger'}
+        />
+        <Metric
+          label="USB 手柄"
+          value={gamepad?.gamepad_connected ? '已连接' : '未连接'}
+          tone={gamepad?.gamepad_connected ? 'good' : 'danger'}
+        />
+        <Metric
+          label="电脑端控制"
+          value={gamepad?.control_enabled ? '已开启' : '已关闭'}
+          tone={gamepad?.control_enabled ? 'good' : 'warn'}
+        />
+        <Metric
+          label="命令年龄"
+          value={formatAge(gamepad?.command_age_ms ?? null)}
+          hint={`归零 ${gamepad?.zero_timeout_ms ?? 300}ms / 上锁 ${
+            gamepad?.disconnect_timeout_ms ?? 1000
+          }ms`}
+          tone={ageTone}
+        />
+        <Metric
+          label="序号"
+          value={gamepad?.last_sequence?.toString() ?? '--'}
+          hint={`已转发 ${
+            gamepad?.last_forwarded_sequence?.toString() ?? '--'
+          }`}
+        />
+        <Metric
+          label="STM32 最近确认"
+          value={gamepad?.last_stm32_ack ? '成功' : '无确认'}
+          hint={gamepad?.eligibility_reason ?? 'no_gamepad_frame'}
+          tone={gamepad?.last_stm32_ack ? 'good' : 'muted'}
+        />
+      </div>
+
+      <div className="gamepad-data-grid">
+        <div className="gamepad-data-block">
+          <h3>原始摇杆</h3>
+          <div className="gamepad-axis-list">
+            {axisLabels.map((label, index) => (
+              <div key={label}>
+                <span>{label}</span>
+                <strong>
+                  {formatNumber(gamepad?.axes[index] ?? NaN, 3)}
+                </strong>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="gamepad-data-block">
+          <h3>原始按钮</h3>
+          <div className="gamepad-button-list">
+            {buttonLabels.map((label, index) => (
+              <span
+                key={label}
+                className={
+                  gamepad?.buttons[index] === 1 ? 'is-pressed' : ''
+                }
+              >
+                button {index} {label}: {gamepad?.buttons[index] ?? 0}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="gamepad-command-grid">
+        {commandAxes.map(([axis, label]) => (
+          <div key={axis}>
+            <span>{label}</span>
+            <strong>
+              {formatNumber(
+                gamepad?.mapped_command[axis] ?? 0,
+                3,
+              )}
+            </strong>
+          </div>
+        ))}
+      </div>
+
+      <div className="gamepad-config-strip">
+        <span>发送 {capabilities.gamepad.send_hz}Hz</span>
+        <span>死区 {capabilities.gamepad.deadzone.toFixed(2)}</span>
+        <span>Expo {capabilities.gamepad.expo.toFixed(2)}</span>
+        <span>全局倍率 {capabilities.gamepad.global_scale.toFixed(2)}</span>
+        <span>
+          反向 surge {capabilities.gamepad.surge_invert ? '是' : '否'}
+          {' / '}sway {capabilities.gamepad.sway_invert ? '是' : '否'}
+          {' / '}yaw {capabilities.gamepad.yaw_invert ? '是' : '否'}
+        </span>
+      </div>
+
+      {(gamepad?.last_error || gamepad?.last_disconnect_reason) && (
+        <div className="inline-error">
+          {gamepad.last_error
+            ? `最近错误：${gamepad.last_error}`
+            : `最近断开：${gamepad.last_disconnect_reason}`}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 function PwmOutputGrid({
   status,
   connected,
@@ -1586,8 +1887,14 @@ export default function App() {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [estopPending, setEstopPending] = useState(false);
   const [estopGateVersion, setEstopGateVersion] = useState<number | null>(null);
-  const [activePage, setActivePage] = useState<'dashboard' | 'motion'>(() => (
-    window.location.hash === '#motion' ? 'motion' : 'dashboard'
+  const [activePage, setActivePage] = useState<
+    'dashboard' | 'motion' | 'gamepad'
+  >(() => (
+    window.location.hash === '#motion'
+      ? 'motion'
+      : window.location.hash === '#gamepad'
+        ? 'gamepad'
+        : 'dashboard'
   ));
   const actionInFlight = useRef(false);
   const actionController = useRef<AbortController | null>(null);
@@ -1600,14 +1907,20 @@ export default function App() {
 
   useEffect(() => {
     const syncPageFromHash = () => {
-      setActivePage(window.location.hash === '#motion' ? 'motion' : 'dashboard');
+      setActivePage(
+        window.location.hash === '#motion'
+          ? 'motion'
+          : window.location.hash === '#gamepad'
+            ? 'gamepad'
+            : 'dashboard',
+      );
     };
     window.addEventListener('hashchange', syncPageFromHash);
     return () => window.removeEventListener('hashchange', syncPageFromHash);
   }, []);
 
-  const selectPage = (page: 'dashboard' | 'motion') => {
-    window.location.hash = page === 'motion' ? 'motion' : 'dashboard';
+  const selectPage = (page: 'dashboard' | 'motion' | 'gamepad') => {
+    window.location.hash = page;
     setActivePage(page);
   };
 
@@ -1743,6 +2056,12 @@ export default function App() {
           >
             运动调参
           </button>
+          <button
+            className={activePage === 'gamepad' ? 'is-active' : ''}
+            onClick={() => selectPage('gamepad')}
+          >
+            手柄控制
+          </button>
         </nav>
 
         <ReadinessStrip
@@ -1788,7 +2107,7 @@ export default function App() {
             <PwmOutputGrid status={status} connected={connected} capabilities={capabilities} />
             <EventLog events={events} />
           </div>
-        ) : (
+        ) : activePage === 'motion' ? (
           <div className="dashboard-grid">
             <MotionTuningPanel
               status={status}
@@ -1801,6 +2120,24 @@ export default function App() {
               onEvent={addEvent}
             />
             <PwmOutputGrid status={status} connected={connected} capabilities={capabilities} />
+            <EventLog events={events} />
+          </div>
+        ) : (
+          <div className="dashboard-grid">
+            <GamepadPanel
+              status={status}
+              connected={connected}
+              capabilities={capabilities}
+              capabilitiesReady={capabilitiesReady}
+              safetyLocked={pwmSafetyLocked}
+              onError={setError}
+              onEvent={addEvent}
+            />
+            <PwmOutputGrid
+              status={status}
+              connected={connected}
+              capabilities={capabilities}
+            />
             <EventLog events={events} />
           </div>
         )}

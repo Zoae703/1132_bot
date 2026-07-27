@@ -27,6 +27,14 @@ from protocol import SafetyState
 from protocol import MotionTuning, SetBodyCommand
 from web_backend.ws_manager import WebSocketManager
 from web_backend.control_state import ControlState
+from web_backend.control_arbiter import (
+    ControlMode,
+    ControlModeConflict,
+)
+from web_backend.gamepad_control import (
+    GamepadControlError,
+    GamepadControlService,
+)
 
 logger = logging.getLogger("opi_console.api")
 
@@ -105,6 +113,7 @@ class FeatureCapabilitiesResponse(BaseModel):
     manual_pwm: bool
     motor_mapping: bool
     motion_tuning: bool
+    gamepad_control: bool
     sensor_stream: bool
     emergency_stop: bool
 
@@ -130,12 +139,33 @@ class TelemetryCapabilitiesResponse(BaseModel):
     sensors_stale_timeout_s: float
 
 
+class GamepadCapabilitiesResponse(BaseModel):
+    axis_count: int
+    min_button_count: int
+    max_button_count: int
+    send_hz: float
+    zero_timeout_ms: int
+    disconnect_timeout_ms: int
+    deadzone: float
+    expo: float
+    global_scale: float
+    surge_scale: float
+    sway_scale: float
+    heave_scale: float
+    yaw_scale: float
+    heave_button_strength: float
+    surge_invert: bool
+    sway_invert: bool
+    yaw_invert: bool
+
+
 class CapabilitiesResponse(BaseModel):
     protocol_version: int
     channel_count: int
     pwm: PwmCapabilitiesResponse
     features: FeatureCapabilitiesResponse
     motion_tuning: MotionTuningCapabilitiesResponse
+    gamepad: GamepadCapabilitiesResponse
     telemetry: TelemetryCapabilitiesResponse
     sensor_poll_hz: float
 
@@ -171,6 +201,7 @@ def create_api_router(
     ws_manager: WebSocketManager,
     control_state: Optional[ControlState] = None,
     config: Optional[AppConfig] = None,
+    gamepad_service: Optional[GamepadControlService] = None,
 ) -> APIRouter:
     router = APIRouter()
     app_config = coerce_config(config or proxy.config)
@@ -215,6 +246,18 @@ def create_api_router(
                 f"{control.motion_inhibit_reason}. Confirm DISARM first.",
             )
 
+    def _acquire_mode(mode: ControlMode, owner: str = "web"):
+        try:
+            control.arbiter.acquire(mode, owner)
+        except ControlModeConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    def _require_mode(mode: ControlMode, owner: str = "web"):
+        try:
+            control.arbiter.require(mode, owner)
+        except ControlModeConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     def _command_failure_status() -> int:
         if not transport.connected:
             return 503
@@ -228,6 +271,11 @@ def create_api_router(
             or proxy.refresh_link_state().last_command_error
             or default
         )
+
+    def _gamepad_service() -> GamepadControlService:
+        if gamepad_service is None:
+            raise HTTPException(503, "Gamepad control service is unavailable")
+        return gamepad_service
 
     # ---- GET /api/capabilities ----
 
@@ -252,6 +300,12 @@ def create_api_router(
             "nack_count": transport.nack_count,
             "backend_motion_inhibited": control.motion_inhibited,
             "backend_motion_inhibit_reason": control.motion_inhibit_reason,
+            "control_mode": control.arbiter.mode.value,
+            "control_arbiter": control.arbiter.snapshot(),
+            "gamepad": (
+                gamepad_service.status_snapshot()
+                if gamepad_service is not None else None
+            ),
             "uptime": time.monotonic() - _startup_mono,
         }
 
@@ -264,6 +318,35 @@ def create_api_router(
             **state.sensors_to_dict(),
             "stm32_online": state.stm32_online,
             "serial_connected": transport.connected,
+        }
+
+    # ---- GET/POST /api/gamepad ----
+
+    @router.get("/gamepad/status")
+    async def get_gamepad_status():
+        return _gamepad_service().status_snapshot()
+
+    @router.post("/gamepad/enable")
+    async def enable_gamepad():
+        try:
+            await _gamepad_service().enable()
+        except GamepadControlError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from exc
+        return {
+            "status": "ok",
+            "message": "GAMEPAD mode enabled; STM32 remains externally armed",
+        }
+
+    @router.post("/gamepad/disable")
+    async def disable_gamepad():
+        try:
+            result = await _gamepad_service().disable()
+        except GamepadControlError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from exc
+        return {
+            "status": "ok",
+            "message": "GAMEPAD stopped and system disarmed",
+            "result": result,
         }
 
     # ---- GET/POST /api/motion/tuning ----
@@ -331,7 +414,11 @@ def create_api_router(
             if state.safety_state != SafetyState.ARMED_IDLE:
                 raise HTTPException(
                     409, "Must be ARMED_IDLE to enable six-axis control")
+            _acquire_mode(ControlMode.WEB_MOTION)
             ok = await proxy.enable_body_control()
+            if not ok:
+                control.arbiter.force_idle("web_motion_enable_failed")
+                await proxy.disarm()
         if not ok:
             reason = _failure_reason(
                 proxy.motion_tuning_snapshot()["sync_error"]
@@ -350,6 +437,7 @@ def create_api_router(
         command = SetBodyCommand(**req.model_dump())
         async with control.lock:
             _reject_during_safety_transition()
+            _require_mode(ControlMode.WEB_MOTION)
             state = _online_state()
             if (
                 state.safety_state != SafetyState.ARMED_ACTIVE
@@ -367,6 +455,8 @@ def create_api_router(
     @router.post("/motion/stop")
     async def stop_motion():
         async with control.lock:
+            if control.arbiter.mode != ControlMode.IDLE:
+                _require_mode(ControlMode.WEB_MOTION)
             state = _online_state()
             if (
                 state.safety_state == SafetyState.ARMED_ACTIVE
@@ -389,8 +479,16 @@ def create_api_router(
     @router.post("/motion/disable")
     async def disable_motion_control():
         async with control.lock:
+            if control.arbiter.mode != ControlMode.IDLE:
+                _require_mode(ControlMode.WEB_MOTION)
             state = _online_state()
             if state.safety_state == SafetyState.ARMED_IDLE:
+                if control.arbiter.mode == ControlMode.WEB_MOTION:
+                    control.arbiter.release(
+                        ControlMode.WEB_MOTION,
+                        "web",
+                        "web_motion_already_disabled",
+                    )
                 return {
                     "status": "ok",
                     "message": "Six-axis control already disabled",
@@ -402,6 +500,12 @@ def create_api_router(
                 raise HTTPException(
                     409, "Six-axis control is not enabled")
             ok = await proxy.disable_body_control()
+            if ok:
+                control.arbiter.release(
+                    ControlMode.WEB_MOTION,
+                    "web",
+                    "web_motion_disabled",
+                )
         if not ok:
             reason = _failure_reason(
                 "six-axis disable confirmation failed")
@@ -419,6 +523,12 @@ def create_api_router(
         _reject_during_safety_transition()
         async with control.lock:
             _reject_during_safety_transition()
+            if control.arbiter.mode != ControlMode.IDLE:
+                raise HTTPException(
+                    409,
+                    "Cannot ARM while control mode "
+                    f"{control.arbiter.mode.value} is active",
+                )
             state = _online_state()
             if state.safety_state == SafetyState.EMERGENCY_STOP:
                 raise HTTPException(409, "Cannot ARM: Emergency stop is active. Use /api/reset-estop first.")
@@ -457,6 +567,7 @@ def create_api_router(
             if ok:
                 control.active_test_channel = None
                 control.clear_motion_inhibit()
+                control.arbiter.force_idle("api_disarm")
         if not ok:
             reason = _failure_reason("ACK or status confirmation timeout")
             _remember_error(f"DISARM failed: {reason}")
@@ -484,6 +595,7 @@ def create_api_router(
         async with control.estop_lock:
             control.estop_in_progress = True
             control.inhibit_motion("emergency_stop_in_progress")
+            control.arbiter.force_idle("emergency_stop")
             try:
                 try:
                     ok = await proxy.emergency_stop()
@@ -542,6 +654,7 @@ def create_api_router(
                 _command_failure_status(),
                 f"RESET_ESTOP failed: {reason}")
         control.clear_motion_inhibit()
+        control.arbiter.force_idle("reset_estop")
         return {"status": "ok", "message": "ESTOP reset — system DISARMED"}
 
     # ---- POST /api/pwm/test ----
@@ -577,6 +690,7 @@ def create_api_router(
                         409,
                         "Must be in MANUAL_TEST mode. Enter manual test mode first.",
                     )
+                _require_mode(ControlMode.MOTOR_TEST)
 
                 now = time.monotonic()
                 if now - control.last_pwm_test_at < 0.3:
@@ -779,6 +893,7 @@ def create_api_router(
             state = _online_state()
             if state.safety_state != SafetyState.ARMED_IDLE:
                 raise HTTPException(409, "Must be ARMED_IDLE to enter manual test mode")
+            _acquire_mode(ControlMode.MOTOR_TEST)
             ok = await proxy.enter_manual()
             rollback_ok = True
             failure_reason = ""
@@ -789,6 +904,7 @@ def create_api_router(
                 failure_status = _command_failure_status()
                 await proxy.force_neutral("enter_manual_unconfirmed")
                 rollback_ok = await proxy.disarm()
+                control.arbiter.force_idle("enter_manual_failed")
         if not ok:
             reason = failure_reason or _failure_reason(
                 "ACK or status confirmation timeout")
@@ -805,6 +921,7 @@ def create_api_router(
     @router.post("/exit-manual")
     async def exit_manual():
         async with control.lock:
+            _require_mode(ControlMode.MOTOR_TEST)
             state = _online_state()
             if state.safety_state != SafetyState.MANUAL_TEST:
                 raise HTTPException(409, "System is not in MANUAL_TEST mode")
@@ -818,8 +935,16 @@ def create_api_router(
                 failure_status = _command_failure_status()
                 await proxy.force_neutral("exit_manual_unconfirmed")
                 rollback_ok = await proxy.disarm()
+                if rollback_ok:
+                    control.arbiter.force_idle(
+                        "exit_manual_failed_disarmed")
             if ok:
                 control.active_test_channel = None
+                control.arbiter.release(
+                    ControlMode.MOTOR_TEST,
+                    "web",
+                    "manual_test_exited",
+                )
         if not ok:
             reason = failure_reason or _failure_reason(
                 "ACK or status confirmation timeout")
@@ -905,6 +1030,8 @@ def create_api_router(
             "simulator_tick": bool(getattr(transport, "_sim_tick_task", None) and not transport._sim_tick_task.done()),
             "ws_broadcast": bool(getattr(ws_manager, "_broadcast_task", None) and not ws_manager._broadcast_task.done()),
             "motion_tuning_sync": proxy.motion_tuning_sync_task_running,
+            "gamepad_command_pump": bool(
+                gamepad_service and gamepad_service.task_running),
         }
         return {
             "service_version": "1.0.0",
@@ -940,6 +1067,11 @@ def create_api_router(
                 "motion_inhibit_reason": control.motion_inhibit_reason,
                 "last_disconnect_result": ws_manager.last_disconnect_safety_result,
                 "motion_tuning": proxy.motion_tuning_snapshot(),
+                "arbiter": control.arbiter.snapshot(),
+                "gamepad": (
+                    gamepad_service.status_snapshot()
+                    if gamepad_service is not None else None
+                ),
             },
             "frames": {
                 "tx": transport.tx_frames,

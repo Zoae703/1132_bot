@@ -3,11 +3,14 @@
 import asyncio
 from typing import Optional
 
+from web_backend.control_arbiter import ControlArbiter
+
 
 class ControlState:
     def __init__(self):
         self.lock = asyncio.Lock()
         self.estop_lock = asyncio.Lock()
+        self.arbiter = ControlArbiter()
         self.estop_in_progress = False
         self.motion_inhibit_reason: Optional[str] = None
         self.safety_transition_active = False

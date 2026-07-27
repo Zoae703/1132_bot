@@ -7,13 +7,26 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 cd "$ROOT"
 export PYTHONPATH="$ROOT/web:$ROOT/web/protocol/shared${PYTHONPATH:+:$PYTHONPATH}"
 
+echo "== Linux gamepad mapping regressions =="
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+PYTHONPATH="$ROOT/gamepad_forwarder_linux" \
+"$PYTHON_BIN" -m pytest \
+  -o cache_dir="${TMPDIR:-/tmp}/pytest_cache_1132_gamepad" \
+  -q gamepad_forwarder_linux/test_gamepad_mapping.py
+
 echo "== Python protocol/backend/simulation regressions =="
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$PYTHON_BIN" -m pytest \
   -o cache_dir="${TMPDIR:-/tmp}/pytest_cache_1132" -q web/tests
 
 echo "== Python undefined/unused-name lint =="
 "$PYTHON_BIN" -m flake8 --select=F \
-  web/opi_console web/web_backend web/tests/test_web_backend.py web/tests/test_web_completion.py
+  web/opi_console web/web_backend \
+  web/tests/test_web_backend.py \
+  web/tests/test_web_completion.py \
+  web/tests/test_gamepad_control.py \
+  gamepad_forwarder_linux/gamepad_mapping.py \
+  gamepad_forwarder_linux/gamepad_forwarder.py \
+  gamepad_forwarder_linux/test_gamepad_mapping.py
 
 echo "== Frontend regressions =="
 npm --prefix web/web_frontend test || echo "SKIP: npm not available"
@@ -44,6 +57,6 @@ fi
 
 echo "== STM32 Debug configure/build =="
 cmake --preset Debug -S firmware
-cmake --build firmware/build/Debug -j2
+cmake --build firmware/build/Debug --clean-first -j2
 
 echo "== ALL TESTS PASSED =="

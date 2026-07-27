@@ -13,8 +13,29 @@ export interface FeatureCapabilities {
   manual_pwm: boolean;
   motor_mapping: boolean;
   motion_tuning: boolean;
+  gamepad_control: boolean;
   sensor_stream: boolean;
   emergency_stop: boolean;
+}
+
+export interface GamepadCapabilities {
+  axis_count: number;
+  min_button_count: number;
+  max_button_count: number;
+  send_hz: number;
+  zero_timeout_ms: number;
+  disconnect_timeout_ms: number;
+  deadzone: number;
+  expo: number;
+  global_scale: number;
+  surge_scale: number;
+  sway_scale: number;
+  heave_scale: number;
+  yaw_scale: number;
+  heave_button_strength: number;
+  surge_invert: boolean;
+  sway_invert: boolean;
+  yaw_invert: boolean;
 }
 
 export interface MotionTuningCapabilities {
@@ -44,6 +65,7 @@ export interface Capabilities {
   pwm: PwmCapabilities;
   features: FeatureCapabilities;
   motion_tuning: MotionTuningCapabilities;
+  gamepad: GamepadCapabilities;
   telemetry: TelemetryCapabilities;
   sensor_poll_hz: number;
 }
@@ -69,6 +91,7 @@ export const LOCKED_CAPABILITIES: Capabilities = {
     manual_pwm: false,
     motor_mapping: false,
     motion_tuning: false,
+    gamepad_control: false,
     sensor_stream: false,
     emergency_stop: true,
   },
@@ -84,6 +107,25 @@ export const LOCKED_CAPABILITIES: Capabilities = {
     pwm_slew_rate_max_us_per_s: 100,
     command_timeout_min_ms: 200,
     command_timeout_max_ms: 200,
+  },
+  gamepad: {
+    axis_count: 6,
+    min_button_count: 4,
+    max_button_count: 4,
+    send_hz: 50,
+    zero_timeout_ms: 300,
+    disconnect_timeout_ms: 1000,
+    deadzone: 0.08,
+    expo: 1,
+    global_scale: 0,
+    surge_scale: 0,
+    sway_scale: 0,
+    heave_scale: 0,
+    yaw_scale: 0,
+    heave_button_strength: 0,
+    surge_invert: true,
+    sway_invert: false,
+    yaw_invert: false,
   },
   telemetry: {
     status_hz: null,
@@ -116,6 +158,64 @@ function optionalPositive(value: unknown, name: string): number | null {
   const parsed = finiteNumber(value, name);
   if (parsed <= 0) throw new Error(`${name} 必须大于 0`);
   return parsed;
+}
+
+function normalizeGamepad(
+  value: unknown,
+  enabled: boolean,
+): GamepadCapabilities {
+  if (!isRecord(value)) {
+    if (enabled) throw new Error('能力配置缺少 gamepad 对象');
+    return { ...LOCKED_CAPABILITIES.gamepad };
+  }
+  const result: GamepadCapabilities = {
+    axis_count: integer(value.axis_count, 'gamepad.axis_count'),
+    min_button_count: integer(
+      value.min_button_count, 'gamepad.min_button_count'),
+    max_button_count: integer(
+      value.max_button_count, 'gamepad.max_button_count'),
+    send_hz: finiteNumber(value.send_hz, 'gamepad.send_hz'),
+    zero_timeout_ms: integer(
+      value.zero_timeout_ms, 'gamepad.zero_timeout_ms'),
+    disconnect_timeout_ms: integer(
+      value.disconnect_timeout_ms, 'gamepad.disconnect_timeout_ms'),
+    deadzone: finiteNumber(value.deadzone, 'gamepad.deadzone'),
+    expo: finiteNumber(value.expo, 'gamepad.expo'),
+    global_scale: finiteNumber(value.global_scale, 'gamepad.global_scale'),
+    surge_scale: finiteNumber(value.surge_scale, 'gamepad.surge_scale'),
+    sway_scale: finiteNumber(value.sway_scale, 'gamepad.sway_scale'),
+    heave_scale: finiteNumber(value.heave_scale, 'gamepad.heave_scale'),
+    yaw_scale: finiteNumber(value.yaw_scale, 'gamepad.yaw_scale'),
+    heave_button_strength: finiteNumber(
+      value.heave_button_strength, 'gamepad.heave_button_strength'),
+    surge_invert: value.surge_invert === true,
+    sway_invert: value.sway_invert === true,
+    yaw_invert: value.yaw_invert === true,
+  };
+  if (
+    result.axis_count !== 6
+    || result.min_button_count < 4
+    || result.max_button_count < result.min_button_count
+    || result.send_hz < 20
+    || result.send_hz > 100
+    || result.zero_timeout_ms < 100
+    || result.disconnect_timeout_ms <= result.zero_timeout_ms
+    || result.deadzone < 0
+    || result.deadzone >= 0.5
+    || result.expo < 1
+    || result.expo > 3
+    || [
+      result.global_scale,
+      result.surge_scale,
+      result.sway_scale,
+      result.heave_scale,
+      result.yaw_scale,
+      result.heave_button_strength,
+    ].some(item => item < 0 || item > 1)
+  ) {
+    throw new Error('手柄能力配置范围无效');
+  }
+  return result;
 }
 
 export function normalizeCapabilities(raw: unknown): Capabilities {
@@ -156,6 +256,7 @@ export function normalizeCapabilities(raw: unknown): Capabilities {
   const telemetry = isRecord(raw.telemetry) ? raw.telemetry : {};
   if (!isRecord(raw.features)) throw new Error('能力配置缺少 features 对象');
   const features = raw.features;
+  const gamepadEnabled = features.gamepad_control === true;
   if (!isRecord(raw.motion_tuning)) {
     throw new Error('能力配置缺少 motion_tuning 对象');
   }
@@ -241,10 +342,12 @@ export function normalizeCapabilities(raw: unknown): Capabilities {
       manual_pwm: features.manual_pwm === true,
       motor_mapping: features.motor_mapping === true,
       motion_tuning: features.motion_tuning === true,
+      gamepad_control: gamepadEnabled,
       sensor_stream: features.sensor_stream === true,
       emergency_stop: features.emergency_stop === true,
     },
     motion_tuning: normalizedMotionTuning,
+    gamepad: normalizeGamepad(raw.gamepad, gamepadEnabled),
     telemetry: {
       status_hz: optionalPositive(telemetry.status_hz, 'telemetry.status_hz'),
       sensors_hz: optionalPositive(telemetry.sensors_hz, 'telemetry.sensors_hz'),

@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Set, Optional
+from typing import Any, Set, Optional
 
 from fastapi import WebSocket
 
@@ -27,11 +27,13 @@ class WebSocketManager:
 
     def __init__(self, proxy: Stm32Proxy, transport: SerialTransport,
                  control_state: Optional[ControlState] = None,
-                 config: Optional[AppConfig] = None):
+                 config: Optional[AppConfig] = None,
+                 gamepad_service: Optional[Any] = None):
         self._proxy = proxy
         self._transport = transport
         self._control_state = control_state or ControlState()
         self._config = coerce_config(config or proxy.config)
+        self._gamepad_service = gamepad_service
         self._clients: Set[WebSocket] = set()
         self._clients_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
@@ -144,6 +146,8 @@ class WebSocketManager:
                 except Exception:
                     logger.exception("DISARM failed after last client disconnect")
         finally:
+            self._control_state.arbiter.force_idle(
+                "last_client_disconnected")
             self._control_state.finish_safety_transition()
             self.last_disconnect_safety_result = result
             logger.warning(
@@ -211,6 +215,12 @@ class WebSocketManager:
             "backend_motion_inhibited": self._control_state.motion_inhibited,
             "backend_motion_inhibit_reason": (
                 self._control_state.motion_inhibit_reason),
+            "control_mode": self._control_state.arbiter.mode.value,
+            "control_arbiter": self._control_state.arbiter.snapshot(),
+            "gamepad": (
+                self._gamepad_service.status_snapshot()
+                if self._gamepad_service is not None else None
+            ),
         }
         return self._message("status", payload)
 

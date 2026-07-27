@@ -11,6 +11,7 @@
 | 只想先看网页长什么样 | 自己电脑 | `./scripts/start_web_console.sh --simulate` | `http://localhost:8000` |
 | 香橙派连接 STM32 真实调试 | 香橙派 | `./scripts/start_web_console.sh` | `http://香橙派IP:8000` |
 | 香橙派不接 STM32 先试网页 | 香橙派 | `./scripts/start_web_console.sh --simulate` | `http://香橙派IP:8000` |
+| Linux USB 手柄转发 | 操作电脑 | `gamepad_forwarder_linux/run.sh` | 连接香橙派 `/ws/control/gamepad` |
 
 关键点：
 
@@ -423,6 +424,7 @@ ACK 超时、NACK、最近错误以及后台任务状态。每条 PWM 操作日�
 - 传感器：深度、压力、水温、航向、俯仰、横滚、IMU 三轴数据。
 - PWM 手动测试：只在 `手动测试` 状态允许输出。
 - 运动调参：配置六轴增益、限幅、全局倍率、PWM 斜率和命令超时，并进行六轴点动。
+- 手柄控制：显示 USB 手柄租约、原始输入、FRD 映射、命令年龄和 GAMEPAD 模式。
 - PWM 输出：显示 8 个通道当前值和目标值。
 - 事件日志：显示连接、控制命令、错误提示。
 
@@ -596,6 +598,295 @@ Orange Pi 服务重启后会重新读取这个 JSON 文件。STM32 单独复位�
 方向错误、剧烈抖动、异响、过流、线缆发热或限幅持续亮起时，立即急停并切断
 动力电源。
 
+### 5.8 Linux USB 手柄控制
+
+#### 5.8.1 实际数据流
+
+手柄控制复用 Web 六轴运动使用的同一条 STM32 协议和同一个 MotorControl
+混控器：
+
+```text
+Linux 电脑 USB 手柄
+  -> gamepad_forwarder_linux/gamepad_forwarder.py
+  -> ws://香橙派IP:8000/ws/control/gamepad
+  -> FastAPI GamepadControlService
+  -> ControlArbiter 的 GAMEPAD 模式
+  -> STM32 SET_BODY_COMMAND
+  -> MotorControl 六轴混控
+  -> CH0-CH7 八路推进器
+```
+
+电脑端只上传原始 `axes/buttons` 和映射后的 `BodyCommand`。香橙派会用自己的
+配置重新计算一次映射并比对结果，随后只发送 `SET_BODY_COMMAND`。电脑端不会
+发送 `SET_PWM`，也不能指定 CH0-CH7，更不能绕过 STM32 的现有混控器。
+
+#### 5.8.2 电脑端安装
+
+电脑端目录为：
+
+```text
+gamepad_forwarder_linux
+```
+
+Ubuntu/Debian 安装：
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-tk
+
+cd gamepad_forwarder_linux
+chmod +x run.sh
+./run.sh
+```
+
+首次运行会建立 `.venv` 并安装 `pygame` 和 `websocket-client`。手柄没有读取
+权限时执行：
+
+```bash
+sudo usermod -aG input "$USER"
+```
+
+然后注销并重新登录。可先检查系统是否识别手柄：
+
+```bash
+ls -l /dev/input/js* /dev/input/event* 2>/dev/null
+```
+
+转发器中填写香橙派 IP、端口 `8000` 和路径
+`/ws/control/gamepad`。推荐发送频率为 `30-50Hz`，默认 `50Hz`。
+
+界面会显示：
+
+- USB 手柄连接状态。
+- 香橙派 WebSocket 和控制租约状态。
+- 电脑端“控制开启”状态。
+- 原始 axes、完整 buttons 和当前按下按钮。
+- 映射后的 surge/sway/heave/roll/pitch/yaw。
+- 实际发送频率和 sequence。
+- 最近 ACK、拒绝原因、服务端控制模式和 RTT。
+- A/Y 冲突、布局错误和最近网络错误。
+
+“控制开启”只表示电脑允许上传有效手柄状态。它不会 ARM、不会解除 ESTOP，
+也不会自动让推进器运动。
+
+#### 5.8.3 最终映射和 FRD 方向
+
+当前 STM32 坐标系为 FRD：`+surge` 向前、`+sway` 向右、`+heave` 向下、
+`+yaw` 从上方看顺时针。
+
+| 输入 | 功能 | 目标 BodyCommand |
+| --- | --- | --- |
+| axis 1 左杆上下 | 前进/后退 | 前推 `surge > 0`，后拉 `< 0` |
+| axis 0 左杆左右 | 左移/右移 | 右推 `sway > 0`，左推 `< 0` |
+| axis 4 右杆左右 | 连续偏航强度 | 右推 `yaw > 0`，左推 `< 0` |
+| button 3，Y | 上浮 | `heave < 0` |
+| button 0，A | 下潜 | `heave > 0` |
+| axis 3 右杆上下 | 保留 | 始终不影响命令 |
+| button 1，B | 保留 | 始终不影响命令 |
+| button 2，X | 保留 | 始终不影响命令 |
+
+第一版始终保持 `roll=0`、`pitch=0`。Y 和 A 同时按下时
+`heave=0`，状态区显示冲突。右杆左右是开环连续偏航强度，不是绝对航向角。
+
+当前默认符号配置为：
+
+```yaml
+gamepad:
+  surge_invert: true
+  sway_invert: false
+  yaw_invert: false
+```
+
+对应的原始值预期为：左杆前推 axis1 为负，左杆右推 axis0 为正，右杆右推
+axis4 为正。不同型号手柄、SDL 映射或驱动可能改变符号，不能只凭手柄习惯
+判断。第一次接实物前，断开推进器动力，在电脑转发器里依次观察：
+
+1. 所有摇杆回中，记录 axis0、axis1、axis4，应接近 `0`。
+2. 左杆前推，记录 axis1 正负。
+3. 左杆右推，记录 axis0 正负。
+4. 右杆右推，记录 axis4 正负。
+5. 如果前推原始值为负，`surge_invert=true`；为正则设为 `false`。
+6. 如果右推原始值为正，`sway_invert=false`；为负则设为 `true`。
+7. 如果右转原始值为正，`yaw_invert=false`；为负则设为 `true`。
+8. 修改香橙派 `opi_console/config.yaml` 后重启后端。
+9. 重新连接转发器，确认它显示的新服务端映射配置。
+10. 在仿真模式重复前、后、左、右、上、下和左右转方向检查。
+
+#### 5.8.4 映射参数
+
+香橙派 `opi_console/config.yaml` 是映射参数的权威来源：
+
+```yaml
+features:
+  gamepad_control: true
+
+gamepad:
+  axis_count: 6
+  min_button_count: 4
+  max_button_count: 32
+  send_hz: 50
+  zero_timeout_ms: 300
+  disconnect_timeout_ms: 1000
+  deadzone: 0.08
+  expo: 1.0
+  global_scale: 0.15
+  surge_scale: 1.0
+  sway_scale: 1.0
+  heave_scale: 1.0
+  yaw_scale: 1.0
+  heave_button_strength: 0.10
+  surge_invert: true
+  sway_invert: false
+  yaw_invert: false
+```
+
+处理顺序为：
+
+```text
+限制到 [-1,1]
+  -> 拒绝 NaN/Inf
+  -> 中心死区
+  -> 死区外连续重映射
+  -> expo
+  -> 方向反转
+  -> 独立轴倍率
+  -> 全局手柄倍率
+```
+
+死区外连续重映射使用：
+
+```text
+(abs(raw) - deadzone) / (1 - deadzone)
+```
+
+因此刚越过死区时从接近零开始，不会突然跳到 `0.08`。`expo=1.0` 为线性；
+提高 expo 会降低中心附近灵敏度。第一次实物验证保持
+`global_scale=0.10-0.15`，不要直接提高到 `1.0`。
+
+#### 5.8.5 模式和安全门禁
+
+同一时刻只能有一个运动控制模式：
+
+```text
+IDLE
+MOTOR_TEST
+WEB_MOTION
+GAMEPAD
+```
+
+单电机 PWM 测试、网页六轴点动和手柄 GAMEPAD 相互排斥。进入 GAMEPAD
+必须同时满足：
+
+1. 串口已连接，STM32 在线且状态不 stale。
+2. STM32 状态为 `ARMED_IDLE`。
+3. 无 ESTOP、无 FAULT、后端没有 motion inhibit。
+4. 当前 ControlArbiter 为 `IDLE`。
+5. 电脑转发器持有唯一手柄租约。
+6. USB 手柄已连接，字段为 6 个轴和至少 4 个按钮。
+7. 电脑端 `control_enabled=true`。
+8. 最新手柄帧小于 `300ms`。
+9. 摇杆已回中，A/Y 已松开，映射后的六轴全为零。
+10. STM32 回报的 8 路 PWM 全部严格等于 `1500us`。
+
+手柄消息不能调用 ARM，也不能 RESET_ESTOP。必须在 Web 顶部由操作者先点击
+“解锁”。退出 GAMEPAD 会立即发送零 BodyCommand、关闭 STM32 六轴控制并
+DISARM。
+
+#### 5.8.6 标准操作顺序
+
+先用仿真执行完整流程：
+
+```bash
+cd /home/zooae/桌面/1132_bot_orangepi
+./scripts/start_web_console.sh --simulate
+```
+
+然后：
+
+1. 电脑插入 USB 手柄，运行 `gamepad_forwarder_linux/run.sh`。
+2. 转发器填写香橙派 IP，点击“启动连接”。
+3. 打开 `http://香橙派IP:8000`，进入“手柄控制”页。
+4. 确认电脑转发程序、USB 手柄均为已连接。
+5. 在转发器观察原始 axis0/1/4，完成方向符号复核。
+6. 所有摇杆回中，松开 A/Y。
+7. 在电脑转发器打开“控制开启”。
+8. Web 顶部点击“解锁”，状态应为 `ARMED_IDLE`。
+9. 确认 PWM 输出区 8 路全为 `1500us`。
+10. 在“手柄控制”页点击“进入 GAMEPAD”。
+11. 确认顶部控制模式变为 `GAMEPAD`，STM32 为 `ARMED_ACTIVE`。
+12. 轻推一个方向，观察原始值、映射值和 PWM，不要同时操作多轴。
+13. 松开摇杆，确认映射归零和 PWM 回中。
+14. 点击“退出并上锁”，确认控制模式回到 `IDLE`、STM32 为 `DISARMED`。
+
+如果“进入 GAMEPAD”按钮不可用，按页面状态从上到下解决，不要重复点击或
+绕过门禁。
+
+#### 5.8.7 断线和超时
+
+香橙派只保留最新一帧，不排队重放旧命令。sequence 必须严格递增，重复或倒退
+帧会被丢弃。
+
+| 事件 | 行为 |
+| --- | --- |
+| 超过 `300ms` 无新帧 | 立即发送六轴全零，保持 GAMEPAD 但锁住非零恢复 |
+| 300ms 后网络恢复且摇杆仍非零 | 继续保持零，必须先回中 |
+| 超过 `1000ms` 无新帧 | 退出 GAMEPAD、关闭六轴控制并 DISARM |
+| USB 手柄拔出 | 立即归零，退出 GAMEPAD 并 DISARM |
+| 电脑取消“控制开启” | 立即归零，退出 GAMEPAD 并 DISARM |
+| 转发程序关闭或 WebSocket 断开 | 立即归零，退出 GAMEPAD 并 DISARM |
+| 电脑网线/电力载波断开 | 先触发 300ms 归零，再触发 1000ms DISARM |
+| 香橙派与 STM32 串口断开 | STM32 继续依靠自身通信/命令超时回中 |
+
+网络恢复不会自动重新进入 GAMEPAD，也不会恢复断线前的非零指令。需要重新
+确认回中、重新 ARM，并由 Web 页面重新进入 GAMEPAD。
+
+#### 5.8.8 常见拒绝原因
+
+- `lease_already_owned`：已有另一个转发器连接，关闭旧实例后重试。
+- `sequence_not_increasing`：客户端序号重复或倒退，重新建立 WebSocket。
+- `mapped_command_mismatch`：电脑和香橙派配置不一致，重连以读取服务端配置。
+- `mode_not_gamepad`：手柄帧已收到，但网页尚未进入 GAMEPAD。
+- `center_controls_after_timeout`：300ms 超时后摇杆仍未回中。
+- `STM32 is offline or status is stale`：先修复串口和遥测。
+- `ARM the system before entering GAMEPAD`：在 Web 顶部手动解锁。
+- `All eight confirmed PWM values must be 1500us`：先上锁/回中并确认新遥测。
+- `MOTOR_TEST/WEB_MOTION is already owned`：先退出当前控制页面的活动模式。
+- `Emergency stop is active`：确认安全后在 Web 顶部解除急停；手柄不能解除。
+
+状态接口：
+
+```bash
+curl -s http://香橙派IP:8000/api/status
+curl -s http://香橙派IP:8000/api/gamepad/status
+curl -s http://香橙派IP:8000/api/diagnostics
+```
+
+#### 5.8.9 拆桨、低功率实物验证
+
+自动测试禁止驱动真实推进器。软件测试通过后，现场按以下顺序人工验证：
+
+1. 拆除所有桨，或断开推进器机械负载。
+2. 将载体固定在测试架，清空周围线束和工具。
+3. 动力电源设置低电压、低限流，并准备物理断电开关。
+4. 先不接动力，只用示波器确认 8 路中位均为 `1500us`。
+5. 仿真模式确认所有手柄方向，再切换真实硬件模式。
+6. 保持 `global_scale=0.10`，各轴 scale 不超过 `1.0`。
+7. 进入 GAMEPAD 前再次确认 8 路均为 `1500us`。
+8. 只轻推 surge 前进，立即松开，确认水平组方向。
+9. 依次测试 surge 后退、sway 左右、yaw 左右。
+10. 单独短按 Y，确认上浮组合；单独短按 A，确认下潜组合。
+11. 同时按 A/Y，确认 heave 为零且页面显示冲突。
+12. 操作 axis3、B、X，确认 PWM 不发生变化。
+13. 保持轻微非零输入，拔掉手柄，确认立即回中和 DISARM。
+14. 再次进入后停止转发程序，确认立即回中和 DISARM。
+15. 再次进入后断开网线，确认约 300ms 回中、约 1000ms DISARM。
+16. 网络恢复后确认不会自动重新运动。
+17. 点击急停，确认手柄输入全部拒绝，8 路保持中位。
+18. 每项完成后上锁、断动力并记录结果。
+
+任何方向与 FRD 表不一致时，立即停止。先核对原始轴符号、invert 配置、
+推进器通道和 `thruster_config.hpp`，不要用增大倍率掩盖方向问题。
+
 ## 6. 电机/推进器调试流程
 
 本节讲的是如何用当前 Web 控制台安全地调试 8 路电机/推进器。下面的“电机”也包括推进器、电调和对应的 PCA9685 PWM 通道。
@@ -653,12 +944,25 @@ FRD 坐标系：`+x=前`、`+y=右`、`+z=下`。`positive_force` 表示
 | CH2 | `vertical_front_right` | 前右 | 垂直 | normal | 逆时针 | `[0,0,1]` |
 | CH3 | `horizontal_front_right` | 前右 | 水平对角 | normal | 逆时针 | `[-0.707,0.707,0]` |
 | CH4 | `horizontal_front_left` | 前左 | 水平对角 | reverse | 顺时针 | `[0.707,0.707,0]` |
-| CH5 | `vertical_front_left` | 前左 | 垂直 | reverse | 顺时针 | `[0,0,-1]` |
-| CH6 | `vertical_rear_left` | 后左 | 垂直 | reverse | 顺时针 | `[0,0,-1]` |
+| CH5 | `vertical_front_left` | 前左 | 垂直 | reverse | 顺时针 | `[0,0,1]` |
+| CH6 | `vertical_rear_left` | 后左 | 垂直 | reverse | 顺时针 | `[0,0,1]` |
 | CH7 | `horizontal_rear_left` | 后左 | 水平对角 | reverse | 顺时针 | `[0.707,-0.707,0]` |
 
 控制器直接从位置和 `positive_force` 计算六轴混控，不再维护另一套逻辑电机号或方向数组。垂直通道为
 `CH1, CH2, CH5, CH6`，水平通道为 `CH0, CH3, CH4, CH7`。
+
+垂直组的混控符号固定为：
+
+| 轴正命令 | 同向通道 | 反向通道 |
+| --- | --- | --- |
+| `+heave`（下潜） | `CH1, CH2, CH5, CH6` | 无 |
+| `+roll` | `CH1, CH2` | `CH5, CH6` |
+| `+pitch` | `CH1, CH6` | `CH2, CH5` |
+
+四个垂直通道的 neutral trim 均为 `0us`，deadzone compensation 均为
+`50us`。因此单独输入 heave 时四路最终 PWM 相同；单独输入 roll 或 pitch
+时，同组通道的最终 PWM 也相同。后续如果确实需要单电机推力校准，必须重新
+验证小命令不会被 trim 反向，并同步更新混控主机测试。
 
 这张表是软件中的硬件真值；接线、桨型或旋向变化后必须同步更新并重新验证。现场调试需要确认：
 
@@ -1227,6 +1531,22 @@ python3 -m pip install -r requirements-dev.txt
 RUN_BROWSER_E2E=1 ./scripts/run_tests.sh
 ```
 
+电脑端手柄映射单独测试：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+PYTHONPATH=gamepad_forwarder_linux \
+python3 -m pytest -q gamepad_forwarder_linux/test_gamepad_mapping.py
+```
+
+后端手柄门禁、租约和超时单独测试：
+
+```bash
+PYTHONPATH=web:web/protocol/shared \
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q web/tests/test_gamepad_control.py
+```
+
 若 Chrome/Chromium 不在常见路径，设置：
 
 ```bash
@@ -1248,6 +1568,7 @@ Web/仿真快速验证：
 curl http://localhost:8000/api/status
 curl http://localhost:8000/api/capabilities
 curl http://localhost:8000/api/diagnostics
+curl http://localhost:8000/api/gamepad/status
 curl -X POST http://localhost:8000/api/arm
 curl -X POST http://localhost:8000/api/enter-manual
 curl -X POST http://localhost:8000/api/pwm/test \

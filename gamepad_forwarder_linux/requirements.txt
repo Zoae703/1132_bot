@@ -1,0 +1,2 @@
+pygame>=2.5,<3
+websocket-client>=1.7,<2

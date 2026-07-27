@@ -24,9 +24,52 @@ test('normalizeStatus uses fail-safe defaults for missing dangerous fields', () 
   assert.equal(status.estop_locked, true);
   assert.equal(status.body_control_enabled, false);
   assert.equal(status.motion_tuning_synced, false);
+  assert.equal(status.control_mode, 'UNKNOWN');
+  assert.equal(status.gamepad.client_connected, false);
+  assert.equal(status.gamepad.eligibility_reason, 'no_gamepad_frame');
   assert.deepEqual(status.confirmed_pwm, []);
   assert.deepEqual(status.requested_pwm, []);
   assert.equal(Number.isNaN(status.depth_m), true);
+});
+
+test('normalizeStatus exposes validated gamepad telemetry fields', () => {
+  const status = normalizeStatus({
+    control_mode: 'GAMEPAD',
+    gamepad: {
+      client_connected: true,
+      lease_session_id: 'session_1234',
+      lease_active: true,
+      gamepad_connected: true,
+      control_enabled: true,
+      eligible: true,
+      eligibility_reason: 'accepted',
+      axes: [-1, 0.5, 0, 0, 0.2, 0],
+      buttons: [0, 0, 0, 1],
+      mapped_command: {
+        surge: 0.15,
+        sway: 0.07,
+        heave: -0.015,
+        roll: 0,
+        pitch: 0,
+        yaw: 0.03,
+      },
+      heave_conflict: false,
+      last_sequence: 42,
+      command_age_ms: 18,
+      last_forwarded_sequence: 42,
+      last_stm32_ack: true,
+      zero_timeout_ms: 300,
+      disconnect_timeout_ms: 1000,
+      send_hz: 50,
+    },
+  });
+  assert.equal(status.control_mode, 'GAMEPAD');
+  assert.equal(status.gamepad.client_connected, true);
+  assert.deepEqual(status.gamepad.axes, [-1, 0.5, 0, 0, 0.2, 0]);
+  assert.equal(status.gamepad.mapped_command.surge, 0.15);
+  assert.equal(status.gamepad.mapped_command.heave, -0.015);
+  assert.equal(status.gamepad.command_age_ms, 18);
+  assert.equal(status.gamepad.last_stm32_ack, true);
 });
 
 test('normalizeStatus exposes six-axis and saturation state', () => {
