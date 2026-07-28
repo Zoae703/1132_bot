@@ -23,14 +23,15 @@ MS5837Sensor/
 
 `Init()`：
 
-1. 调用 `MS5837::init(&hi2c1)`，做 reset → 读 PROM → CRC 校验。
-2. 校验通过则调用 `setFluidDensity(...)`，并把 `is_ready()` 置 true。
-3. 校验失败时 `is_ready()` 保持 false，`Update()` 直接 no-op，不会阻塞主循环或反复重试。
+1. 最多三次调用 `MS5837::init(&hi2c2)`（失败间隔 100ms），做 reset → 读 PROM → CRC 校验。
+2. 仅接受已识别的 MS5837-30BA / 02BA；成功后调用 `setFluidDensity(...)`，并把 `is_ready()` 置 true。
+3. 三次均失败时 `is_ready()` 保持 false；启动过程有界，不会永久阻塞其它模块。
 
 `Update()`：
 
 - 仅在 `is_ready()` 为 true 时工作。
-- 用 `HAL_GetTick()` 节流，每隔 `read_period_ms` 调用一次 `MS5837::read()`（阻塞约 40 ms）。
+- 用 `HAL_GetTick()` 节流，每隔 `read_period_ms` 调用一次 `MS5837::read()`（阻塞约 40 ms）；只有完整采样成功且数值有限时才发布新的深度数据。
+- 启动失败后每 1s 最多重试一次；恢复时仍保持样本无效，直到首个成功采样，且不会自动恢复 ARM 或定深状态。
 
 ## 参数
 

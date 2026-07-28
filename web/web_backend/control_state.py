@@ -3,7 +3,7 @@
 import asyncio
 from typing import Optional
 
-from web_backend.control_arbiter import ControlArbiter
+from web_backend.control_arbiter import ControlArbiter, ControlMode
 
 
 class ControlState:
@@ -39,3 +39,29 @@ class ControlState:
 
     def clear_motion_inhibit(self):
         self.motion_inhibit_reason = None
+
+    def reconcile_depth_hold(
+        self,
+        safety_state: int,
+        float_enabled: bool,
+        link_ready: bool = True,
+        reason: str = "firmware_depth_hold_inactive",
+    ) -> bool:
+        """Release stale ownership after firmware has fail-closed depth hold.
+
+        Command routes hold ``lock`` while transitioning into or out of depth
+        hold. Skipping reconciliation during those transitions prevents a
+        concurrently broadcast pre-command status from releasing newly
+        acquired ownership.
+        """
+        if self.arbiter.mode != ControlMode.DEPTH_HOLD:
+            return False
+        if not link_ready:
+            self.arbiter.force_idle("depth_hold_link_unready")
+            return True
+        if self.lock.locked() or (
+            int(safety_state) == 2 and float_enabled
+        ):
+            return False
+        self.arbiter.force_idle(reason)
+        return True

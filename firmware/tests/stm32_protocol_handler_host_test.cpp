@@ -67,7 +67,15 @@ void reset_fixture(BinaryProtocol *bp)
 {
     bp_init(bp);
     robot = RobotData{};
+    // Most protocol tests model a PCA9685 that has already completed its
+    // verified neutral initialization.
+    robot.actuator_output_ready = true;
     fake_tick = 1000U;
+    robot.depth_sensor_ready = true;
+    robot.depth_sample_valid = true;
+    robot.depth_sample_ms = fake_tick;
+    robot.depth_sample_generation = 1U;
+    robot.depth_m = 0.42F;
 }
 
 void enter_armed_active(BinaryProtocol *bp)
@@ -190,6 +198,163 @@ void test_float_value_and_state_validation(BinaryProtocol *bp)
                       reinterpret_cast<const uint8_t *>(&motion), sizeof(motion));
     expect_nack(bp, 0x202U, ProtoMsg_SET_MOTION, ProtoNack_BadState);
     assert_body_output_neutral();
+}
+
+void test_depth_hold_health_tuning_and_reports(BinaryProtocol *bp)
+{
+    reset_fixture(bp);
+    robot.depth_sample_valid = false;
+    robot.depth_sample_generation = 0U;
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x210U, nullptr, 0U);
+    expect_ack(bp, 0x210U);
+    bp_dispatch_frame(bp, ProtoMsg_FLOAT_ON, 0x211U, nullptr, 0U);
+    expect_nack(
+        bp, 0x211U, ProtoMsg_FLOAT_ON, ProtoNack_InternalError);
+    assert(robot.state == RobotState::ARMED_IDLE);
+    assert(!robot.float_enabled);
+    assert(robot.last_neutral_reason == ProtoNeutral_DEPTH_SENSOR);
+    assert_body_output_neutral();
+
+    reset_fixture(bp);
+    robot.depth_sample_ms = fake_tick - ROBOT_DEPTH_SAMPLE_MAX_AGE_MS - 1U;
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x212U, nullptr, 0U);
+    expect_ack(bp, 0x212U);
+    bp_dispatch_frame(bp, ProtoMsg_FLOAT_ON, 0x213U, nullptr, 0U);
+    expect_nack(
+        bp, 0x213U, ProtoMsg_FLOAT_ON, ProtoNack_InternalError);
+    assert(!robot.float_enabled);
+
+    reset_fixture(bp);
+    robot.depth_m = -0.05F;
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x20EU, nullptr, 0U);
+    expect_ack(bp, 0x20EU);
+    bp_dispatch_frame(bp, ProtoMsg_FLOAT_ON, 0x20FU, nullptr, 0U);
+    expect_nack(
+        bp, 0x20FU, ProtoMsg_FLOAT_ON, ProtoNack_InternalError);
+    assert(robot.state == RobotState::ARMED_IDLE);
+    assert(!robot.float_enabled);
+    assert(robot.last_neutral_reason == ProtoNeutral_DEPTH_SENSOR);
+    assert_body_output_neutral();
+
+    reset_fixture(bp);
+    bp_dispatch_frame(bp, ProtoMsg_REQUEST_DEPTH_PID_TUNING,
+                      0x214U, nullptr, 0U);
+    Response response = pop_response(bp);
+    assert(response.type == ProtoMsg_DEPTH_PID_TUNING_REPORT);
+    assert(response.payload_length == sizeof(ProtoDepthPidTuning));
+    ProtoDepthPidTuning tuning{};
+    std::memcpy(&tuning, response.payload, sizeof(tuning));
+    assert(tuning.kp == 10.0F);
+    assert(tuning.ki == 0.02F);
+    assert(tuning.kd == 10.0F);
+    assert(tuning.output_limit_us == 200.0F);
+
+    tuning = ProtoDepthPidTuning{
+        8.0F, 0.0F, 4.0F, 90.0F, 25.0F, 30.0F, 150.0F,
+    };
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_DEPTH_PID_TUNING, 0x215U,
+        reinterpret_cast<const uint8_t *>(&tuning), sizeof(tuning));
+    expect_ack(bp, 0x215U);
+    assert(robot.depth_pid_tuning.kp == 8.0F);
+    assert(robot.depth_pid_tuning.ki == 0.0F);
+    assert(robot.depth_pid_tuning.output_limit_us == 150.0F);
+
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x216U, nullptr, 0U);
+    expect_ack(bp, 0x216U);
+    bp_dispatch_frame(bp, ProtoMsg_FLOAT_ON, 0x217U, nullptr, 0U);
+    expect_ack(bp, 0x217U);
+    assert(robot.target_depth_cm == 42.0F);
+    assert(robot.depth_active_setpoint_cm == 42.0F);
+    assert(robot.float_enabled);
+    assert(robot.depth_hold_session_generation == 1U);
+    assert(robot.depth_command_last_ms == fake_tick);
+
+    const uint32_t generation_before_target =
+        robot.depth_control_generation;
+    ProtoSetDepth depth{125.0F};
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_DEPTH, 0x218U,
+        reinterpret_cast<const uint8_t *>(&depth), sizeof(depth));
+    expect_ack(bp, 0x218U);
+    assert(robot.target_depth_cm == 125.0F);
+    assert(robot.depth_control_generation >
+           generation_before_target);
+    const uint32_t generation_after_target =
+        robot.depth_control_generation;
+
+    fake_tick += 200U;
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_DEPTH, 0x219U,
+        reinterpret_cast<const uint8_t *>(&depth), sizeof(depth));
+    expect_ack(bp, 0x219U);
+    assert(robot.last_cmd_tick == fake_tick);
+    assert(robot.depth_command_last_ms == fake_tick);
+    assert(robot.depth_control_generation ==
+           generation_after_target);
+
+    const uint32_t depth_lease_before_yaw =
+        robot.depth_command_last_ms;
+    fake_tick += 50U;
+    const ProtoSetYaw yaw{15.0F};
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_YAW, 0x2191U,
+        reinterpret_cast<const uint8_t *>(&yaw), sizeof(yaw));
+    expect_ack(bp, 0x2191U);
+    assert(robot.last_cmd_tick == fake_tick);
+    assert(robot.depth_command_last_ms == depth_lease_before_yaw);
+    bp_dispatch_frame(bp, ProtoMsg_ANGLE_OFF, 0x2192U, nullptr, 0U);
+    expect_ack(bp, 0x2192U);
+    assert(robot.float_enabled);
+
+    bp_dispatch_frame(
+        bp, ProtoMsg_REQUEST_DEPTH_CONTROL, 0x21AU, nullptr, 0U);
+    response = pop_response(bp);
+    assert(response.type == ProtoMsg_DEPTH_CONTROL_REPORT);
+    assert(response.payload_length == sizeof(ProtoDepthControlReport));
+    ProtoDepthControlReport control{};
+    std::memcpy(&control, response.payload, sizeof(control));
+    assert(control.requested_target_cm == 125.0F);
+    assert(control.active_setpoint_cm == 125.0F);
+    assert((control.flags & 0x01U) != 0U);
+    assert((control.flags & 0x02U) != 0U);
+    assert((control.flags & 0x04U) != 0U);
+    assert((control.flags & 0x20U) != 0U);
+    assert(control.sample_age_ms ==
+           fake_tick - robot.depth_sample_ms);
+
+    tuning.kp = 9.0F;
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_DEPTH_PID_TUNING, 0x21BU,
+        reinterpret_cast<const uint8_t *>(&tuning), sizeof(tuning));
+    expect_nack(
+        bp, 0x21BU, ProtoMsg_SET_DEPTH_PID_TUNING,
+        ProtoNack_BadState);
+    assert(robot.depth_pid_tuning.kp == 8.0F);
+
+    bp_dispatch_frame(bp, ProtoMsg_FLOAT_OFF, 0x21CU, nullptr, 0U);
+    expect_ack(bp, 0x21CU);
+    assert(robot.state == RobotState::ARMED_IDLE);
+    assert(!robot.float_enabled);
+    assert(robot.depth_pid_output_us == 0.0F);
+    assert_body_output_neutral();
+
+    tuning.kp = NAN;
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_DEPTH_PID_TUNING, 0x21DU,
+        reinterpret_cast<const uint8_t *>(&tuning), sizeof(tuning));
+    expect_nack(
+        bp, 0x21DU, ProtoMsg_SET_DEPTH_PID_TUNING,
+        ProtoNack_InvalidValue);
+
+    reset_fixture(bp);
+    enter_body_control(bp);
+    depth.target_depth_cm = 100.0F;
+    bp_dispatch_frame(
+        bp, ProtoMsg_SET_DEPTH, 0x21EU,
+        reinterpret_cast<const uint8_t *>(&depth), sizeof(depth));
+    expect_nack(
+        bp, 0x21EU, ProtoMsg_SET_DEPTH, ProtoNack_BadState);
 }
 
 void test_body_command_acceptance_and_fail_closed_rejection(BinaryProtocol *bp)
@@ -447,6 +612,41 @@ void test_estop_remains_latched_across_disarm(BinaryProtocol *bp)
     assert(!robot.estop_locked);
 }
 
+void test_actuator_readiness_blocks_arm_and_estop_reset(BinaryProtocol *bp)
+{
+    reset_fixture(bp);
+    robot.actuator_output_ready = false;
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x380U, nullptr, 0U);
+    expect_nack(bp, 0x380U, ProtoMsg_ARM, ProtoNack_InternalError);
+    assert(robot.state == RobotState::DISARMED);
+
+    robot.actuator_output_ready = true;
+    bp_dispatch_frame(bp, ProtoMsg_ARM, 0x381U, nullptr, 0U);
+    expect_ack(bp, 0x381U);
+    bp_dispatch_frame(bp, ProtoMsg_EMERGENCY_STOP, 0x382U, nullptr, 0U);
+    expect_ack(bp, 0x382U);
+
+    robot.actuator_output_ready = false;
+    bp_dispatch_frame(bp, ProtoMsg_RESET_ESTOP, 0x383U, nullptr, 0U);
+    expect_nack(
+        bp, 0x383U, ProtoMsg_RESET_ESTOP, ProtoNack_InternalError);
+    assert(robot.estop_locked);
+    assert(robot.state == RobotState::EMERGENCY_STOP);
+
+    robot.actuator_output_ready = true;
+    bp_dispatch_frame(bp, ProtoMsg_RESET_ESTOP, 0x384U, nullptr, 0U);
+    expect_ack(bp, 0x384U);
+    assert(!robot.estop_locked);
+    assert(robot.state == RobotState::DISARMED);
+
+    robot.actuator_output_ready = false;
+    robot.state = RobotState::FAULT;
+    bp_dispatch_frame(bp, ProtoMsg_DISARM, 0x385U, nullptr, 0U);
+    expect_ack(bp, 0x385U);
+    assert(robot.state == RobotState::FAULT);
+    assert(robot.last_neutral_reason == ProtoNeutral_FAULT);
+}
+
 void test_set_all_neutral_exits_manual_mode(BinaryProtocol *bp)
 {
     reset_fixture(bp);
@@ -486,10 +686,12 @@ int main()
     test_length_and_unsupported_rejection(bp);
     test_pwm_validation_and_sequence(bp);
     test_float_value_and_state_validation(bp);
+    test_depth_hold_health_tuning_and_reports(bp);
     test_body_command_acceptance_and_fail_closed_rejection(bp);
     test_body_control_mode_and_tuning(bp);
     test_legacy_motion_maps_to_body_command(bp);
     test_estop_remains_latched_across_disarm(bp);
+    test_actuator_readiness_blocks_arm_and_estop_reset(bp);
     test_set_all_neutral_exits_manual_mode(bp);
     std::cout << "stm32 protocol handler host tests: PASS\n";
     return 0;

@@ -58,12 +58,17 @@ class MsgType(IntEnum):
     BODY_CONTROL_ON = 0x38
     BODY_CONTROL_OFF = 0x39
     SET_MOTION_TUNING = 0x3A
+    SET_DEPTH_PID_TUNING = 0x3B
     REQUEST_STATUS = 0x40
     REQUEST_SENSORS = 0x41
     REQUEST_MOTION_TUNING = 0x42
+    REQUEST_DEPTH_PID_TUNING = 0x43
+    REQUEST_DEPTH_CONTROL = 0x44
     STATUS_REPORT = 0x80
     SENSOR_REPORT = 0x81
     MOTION_TUNING_REPORT = 0x82
+    DEPTH_PID_TUNING_REPORT = 0x83
+    DEPTH_CONTROL_REPORT = 0x84
     LOG_MESSAGE = 0x90
     SAFETY_EVENT = 0x91
     HEARTBEAT = 0xF0
@@ -108,6 +113,7 @@ class NeutralReason(IntEnum):
     EMERGENCY_STOP = 5
     LAST_CLIENT_DISCONNECTED = 6
     FAULT = 7
+    DEPTH_SENSOR = 8
 
 
 class SafetyEventType(IntEnum):
@@ -298,6 +304,49 @@ class MotionTuning:
 
 
 @dataclass
+class DepthPidTuning:
+    """SET_DEPTH_PID_TUNING / DEPTH_PID_TUNING_REPORT payload."""
+    kp: float = 10.0
+    ki: float = 0.02
+    kd: float = 10.0
+    p_limit_us: float = 100.0
+    i_limit_us: float = 50.0
+    d_limit_us: float = 50.0
+    output_limit_us: float = 200.0
+
+    _fmt: str = field(default="<7f", repr=False, init=False)
+
+    def values(self) -> List[float]:
+        return [
+            self.kp,
+            self.ki,
+            self.kd,
+            self.p_limit_us,
+            self.i_limit_us,
+            self.d_limit_us,
+            self.output_limit_us,
+        ]
+
+    def pack(self) -> bytes:
+        return struct.pack(self._fmt, *self.values())
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "DepthPidTuning":
+        return cls(*struct.unpack(cls._fmt, data))
+
+    def to_dict(self) -> dict:
+        return {
+            "kp": self.kp,
+            "ki": self.ki,
+            "kd": self.kd,
+            "p_limit_us": self.p_limit_us,
+            "i_limit_us": self.i_limit_us,
+            "d_limit_us": self.d_limit_us,
+            "output_limit_us": self.output_limit_us,
+        }
+
+
+@dataclass
 class StatusReport:
     """STATUS_REPORT payload (24 bytes)."""
     safety_state: int = 0
@@ -394,6 +443,91 @@ class SensorReport:
             accel=list(vals[6:9]), gyro=list(vals[9:12]), mag=list(vals[12:15]),
             yaw_v=vals[15], pitch_v=vals[16], roll_v=vals[17],
         )
+
+
+@dataclass
+class DepthControlReport:
+    """DEPTH_CONTROL_REPORT payload (40 bytes)."""
+    requested_target_cm: float = 0.0
+    active_setpoint_cm: float = 0.0
+    measured_depth_cm: float = 0.0
+    error_cm: float = 0.0
+    p_term_us: float = 0.0
+    i_term_us: float = 0.0
+    d_term_us: float = 0.0
+    output_us: float = 0.0
+    sample_age_ms: int = 0
+    flags: int = 0
+    fault_reason: int = 0
+    reserved: int = 0
+
+    _fmt: str = field(default="<8fIBBH", repr=False, init=False)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.flags & 0x01)
+
+    @property
+    def sensor_ready(self) -> bool:
+        return bool(self.flags & 0x02)
+
+    @property
+    def sample_fresh_valid(self) -> bool:
+        return bool(self.flags & 0x04)
+
+    @property
+    def pid_saturated(self) -> bool:
+        return bool(self.flags & 0x08)
+
+    @property
+    def vertical_saturated(self) -> bool:
+        return bool(self.flags & 0x10)
+
+    @property
+    def actuator_ready(self) -> bool:
+        return bool(self.flags & 0x20)
+
+    def pack(self) -> bytes:
+        return struct.pack(
+            self._fmt,
+            self.requested_target_cm,
+            self.active_setpoint_cm,
+            self.measured_depth_cm,
+            self.error_cm,
+            self.p_term_us,
+            self.i_term_us,
+            self.d_term_us,
+            self.output_us,
+            self.sample_age_ms & 0xFFFFFFFF,
+            self.flags & 0xFF,
+            self.fault_reason & 0xFF,
+            self.reserved & 0xFFFF,
+        )
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "DepthControlReport":
+        return cls(*struct.unpack(cls._fmt, data))
+
+    def to_dict(self) -> dict:
+        return {
+            "requested_target_cm": self.requested_target_cm,
+            "active_setpoint_cm": self.active_setpoint_cm,
+            "measured_depth_cm": self.measured_depth_cm,
+            "error_cm": self.error_cm,
+            "p_term_us": self.p_term_us,
+            "i_term_us": self.i_term_us,
+            "d_term_us": self.d_term_us,
+            "output_us": self.output_us,
+            "sample_age_ms": self.sample_age_ms,
+            "flags": self.flags,
+            "fault_reason": self.fault_reason,
+            "enabled": self.enabled,
+            "sensor_ready": self.sensor_ready,
+            "sample_fresh_valid": self.sample_fresh_valid,
+            "pid_saturated": self.pid_saturated,
+            "vertical_saturated": self.vertical_saturated,
+            "actuator_ready": self.actuator_ready,
+        }
 
 
 @dataclass
@@ -495,9 +629,12 @@ _PAYLOAD_CLASSES = {
     MsgType.SET_MOTION: SetMotion,
     MsgType.SET_BODY_COMMAND: SetBodyCommand,
     MsgType.SET_MOTION_TUNING: MotionTuning,
+    MsgType.SET_DEPTH_PID_TUNING: DepthPidTuning,
     MsgType.STATUS_REPORT: StatusReport,
     MsgType.SENSOR_REPORT: SensorReport,
     MsgType.MOTION_TUNING_REPORT: MotionTuning,
+    MsgType.DEPTH_PID_TUNING_REPORT: DepthPidTuning,
+    MsgType.DEPTH_CONTROL_REPORT: DepthControlReport,
     MsgType.ACK: ProtoAck,
     MsgType.NACK: ProtoNack,
     MsgType.SAFETY_EVENT: SafetyEvent,

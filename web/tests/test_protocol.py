@@ -13,12 +13,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "protocol", "sh
 
 import pytest
 from protocol import (
-    MAGIC_0, MAGIC_1, VERSION, FRAME_OVERHEAD, MAX_PAYLOAD, BUF_SIZE,
-    MsgType, SafetyState, NackReason, SafetyEventType,
-    SetPwm, SetDepth, SetYaw, SetMotion, SetBodyCommand, MotionTuning,
-    StatusReport, SensorReport,
+    MAGIC_0, MAGIC_1, FRAME_OVERHEAD, MAX_PAYLOAD,
+    MsgType, SafetyState, NackReason,
+    SetPwm, SetDepth, SetBodyCommand, MotionTuning,
+    DepthPidTuning, StatusReport, SensorReport, DepthControlReport,
     ProtoAck, ProtoNack,
-    SafetyEvent, Heartbeat, HeartbeatAck,
+    Heartbeat, HeartbeatAck,
     crc16, encode_frame, decode_frame,
     find_frame_start, unpack_payload, pack_payload,
 )
@@ -391,6 +391,52 @@ class TestPayloadDataclasses:
         assert obj2.pwm_slew_rate_us_per_s == 1500
         assert obj2.command_timeout_ms == 800
 
+    def test_depth_pid_tuning(self):
+        obj = DepthPidTuning(
+            kp=12.0,
+            ki=0.05,
+            kd=8.0,
+            p_limit_us=90.0,
+            i_limit_us=40.0,
+            d_limit_us=30.0,
+            output_limit_us=160.0,
+        )
+        data = pack_payload(MsgType.SET_DEPTH_PID_TUNING, obj)
+        assert data is not None
+        assert len(data) == 28
+        obj2 = unpack_payload(MsgType.DEPTH_PID_TUNING_REPORT, data)
+        assert isinstance(obj2, DepthPidTuning)
+        assert obj2.values() == pytest.approx(obj.values())
+
+    def test_depth_control_report(self):
+        obj = DepthControlReport(
+            requested_target_cm=125.0,
+            active_setpoint_cm=124.0,
+            measured_depth_cm=120.0,
+            error_cm=4.0,
+            p_term_us=40.0,
+            i_term_us=2.0,
+            d_term_us=-5.0,
+            output_us=37.0,
+            sample_age_ms=12,
+            flags=0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20,
+            fault_reason=0,
+        )
+        data = pack_payload(MsgType.DEPTH_CONTROL_REPORT, obj)
+        assert data is not None
+        assert len(data) == 40
+        obj2 = unpack_payload(MsgType.DEPTH_CONTROL_REPORT, data)
+        assert isinstance(obj2, DepthControlReport)
+        assert obj2.requested_target_cm == pytest.approx(125.0)
+        assert obj2.output_us == pytest.approx(37.0)
+        assert obj2.sample_age_ms == 12
+        assert obj2.enabled is True
+        assert obj2.sensor_ready is True
+        assert obj2.sample_fresh_valid is True
+        assert obj2.pid_saturated is True
+        assert obj2.vertical_saturated is True
+        assert obj2.actuator_ready is True
+
     def test_status_report(self):
         obj = StatusReport(
             safety_state=SafetyState.ARMED_IDLE,
@@ -556,6 +602,17 @@ class TestCCompatibility:
     def test_sensor_report_size(self):
         """ProtoSensorReport should be 18*4 = 72 bytes."""
         assert len(SensorReport().pack()) == 72
+
+    def test_depth_payload_sizes(self):
+        assert len(DepthPidTuning().pack()) == 28
+        assert len(DepthControlReport().pack()) == 40
+
+    def test_depth_message_ids_match_shared_header(self):
+        assert MsgType.SET_DEPTH_PID_TUNING == 0x3B
+        assert MsgType.REQUEST_DEPTH_PID_TUNING == 0x43
+        assert MsgType.REQUEST_DEPTH_CONTROL == 0x44
+        assert MsgType.DEPTH_PID_TUNING_REPORT == 0x83
+        assert MsgType.DEPTH_CONTROL_REPORT == 0x84
 
     def test_nack_size(self):
         assert len(ProtoNack().pack()) == 4

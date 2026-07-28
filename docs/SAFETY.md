@@ -29,10 +29,13 @@
 - Requested PWM is never displayed as confirmed until a status report arrives
 - Ordinary commands are single-flight; ESTOP has an independent priority path
 - Startup and shutdown both request confirmed neutral and DISARM
-- MOTOR_TEST, WEB_MOTION, and GAMEPAD use one exclusive ControlArbiter
+- MOTOR_TEST, WEB_MOTION, GAMEPAD, and DEPTH_HOLD use one exclusive ControlArbiter
 - One gamepad WebSocket lease; duplicate or out-of-order frames are discarded
 - Gamepad 300ms timeout sends zero and requires center before resuming
 - Gamepad 1000ms timeout or disconnect exits the mode and DISARMs
+- Web depth hold requires fresh sensor/diagnostic data and explicit enable
+- Depth-target keepalive stops on page/link failure; the STM32 owns the 500ms
+  lease timeout and authoritative all-channel neutral response
 
 ### Layer 3: Physical Safety
 - Power-on default: all PWM = 1500us
@@ -75,6 +78,8 @@
 | Gamepad frame age reaches 300ms | Gamepad command pump | Six-axis zero; nonzero recovery locked until controls center |
 | Gamepad frame age reaches 1000ms | Gamepad command pump | Exit GAMEPAD, zero, disable body control, DISARM |
 | Gamepad unplug/client close/network socket close | Lease WebSocket | Immediate safe GAMEPAD shutdown and DISARM |
+| MS5837 sample invalid or older than 500ms | STM32 sample timestamp | Exit depth hold, ARMED_IDLE, all PWM neutral |
+| Depth `SET_DEPTH` lease older than 500ms | STM32 command timestamp | Exit depth hold, ARMED_IDLE, all PWM neutral |
 
 ## Pre-Flight Checklist
 
@@ -92,3 +97,6 @@ Before any in-water testing:
 - [ ] Reconnect → verify system recovers
 - [ ] Confirm USART6 contains framed binary data only (no interleaved log text)
 - [ ] IWDG watchdog active (check with debugger)
+- [ ] Calibrate/verify the surface pressure offset before absolute-depth testing
+- [ ] Enable depth hold with propellers disabled and verify no target step
+- [ ] Stop Web keepalive and verify `ARMED_IDLE` plus all 8 PWM at 1500us

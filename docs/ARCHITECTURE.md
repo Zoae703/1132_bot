@@ -83,17 +83,25 @@
     movement again. After 1000ms, USB disconnect, disabled client control, or
     WebSocket disconnect, it exits body control and DISARMs.
 
+12. **MS5837 → depth PID → existing mixer**: successful pressure samples carry
+    a generation and timestamp. The depth PID advances once per new sample and
+    contributes only the existing `heave` correction. A stale/invalid sample or
+    expired 500ms depth-command lease disables the loop and returns all outputs
+    to neutral.
+
 ## Operator Control Arbitration
 
 The Orange Pi has one process-wide motor-control owner:
 
 ```text
-IDLE -> MOTOR_TEST | WEB_MOTION | GAMEPAD
+IDLE -> MOTOR_TEST | WEB_MOTION | GAMEPAD | DEPTH_HOLD
 ```
 
 Only `IDLE` may transition into a control mode. DISARM, ESTOP, service
 disconnect, or a completed mode exit returns ownership to `IDLE`. The gamepad
-cannot ARM or RESET_ESTOP and never sends channel PWM.
+cannot ARM or RESET_ESTOP and never sends channel PWM. The Web depth-tuning mode
+is exclusive and does not automatically take over after a browser/backend
+restart.
 
 ## Safety State Machine
 

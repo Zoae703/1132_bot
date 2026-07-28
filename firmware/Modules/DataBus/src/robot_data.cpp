@@ -62,6 +62,50 @@ bool motion_tuning_is_valid(const MotionTuning &tuning)
                ROBOT_BODY_COMMAND_TIMEOUT_MAX_MS;
 }
 
+bool depth_pid_tuning_is_valid(const DepthPidTuning &tuning)
+{
+    return std::isfinite(tuning.kp) &&
+           tuning.kp >= 0.0F && tuning.kp <= 100.0F &&
+           std::isfinite(tuning.ki) &&
+           tuning.ki >= 0.0F && tuning.ki <= 10.0F &&
+           std::isfinite(tuning.kd) &&
+           tuning.kd >= 0.0F && tuning.kd <= 100.0F &&
+           std::isfinite(tuning.p_limit_us) &&
+           tuning.p_limit_us >= 0.0F && tuning.p_limit_us <= 200.0F &&
+           std::isfinite(tuning.i_limit_us) &&
+           tuning.i_limit_us >= 0.0F && tuning.i_limit_us <= 200.0F &&
+           std::isfinite(tuning.d_limit_us) &&
+           tuning.d_limit_us >= 0.0F && tuning.d_limit_us <= 200.0F &&
+           std::isfinite(tuning.output_limit_us) &&
+           tuning.output_limit_us >= 1.0F &&
+           tuning.output_limit_us <= 200.0F;
+}
+
+bool depth_sample_is_fresh(const RobotData &data, uint32_t now)
+{
+    return data.depth_sensor_ready &&
+           data.depth_sample_valid &&
+           data.depth_sample_generation != 0U &&
+           std::isfinite(data.depth_m) &&
+           data.depth_m >= ROBOT_DEPTH_VALID_MIN_M &&
+           data.depth_m <= ROBOT_DEPTH_VALID_MAX_M &&
+           (now - data.depth_sample_ms) <= ROBOT_DEPTH_SAMPLE_MAX_AGE_MS;
+}
+
+void reset_depth_control_runtime(RobotData &data)
+{
+    data.depth_control_generation++;
+    data.depth_active_setpoint_cm = data.target_depth_cm;
+    data.depth_control_measured_cm = data.depth_m * 100.0F;
+    data.depth_error_cm = 0.0F;
+    data.depth_pid_p_us = 0.0F;
+    data.depth_pid_i_us = 0.0F;
+    data.depth_pid_d_us = 0.0F;
+    data.depth_pid_output_us = 0.0F;
+    data.depth_pid_saturated = false;
+    data.depth_control_fault_reason = 0U;
+}
+
 void invalidate_body_command(RobotData &data)
 {
     data.body_command = BodyCommand{};

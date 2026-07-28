@@ -10,15 +10,18 @@ class PCA9685Driver {
 public:
     PCA9685Driver(float freq = 50.0f) : freq_(freq) {}
 
-    void Init() {
+    bool Init() {
         (void)freq_;
         initialized_ = PCA9685_Init(&hi2c2);
         last_write_ok_ = initialized_;
+        recovery_required_ = !initialized_;
+        return initialized_;
     }
 
-    void Update() {
+    bool Update() {
         if (!initialized_) {
-            return;
+            last_write_ok_ = false;
+            return false;
         }
 
         int32_t pwm[8];
@@ -35,7 +38,12 @@ public:
             pwm, output_generation_matches,
             &robot.pwm_output_generation, generation, &superseded);
         if (!last_write_ok_) {
-            return;
+            taskENTER_CRITICAL();
+            robot.actuator_output_ready = false;
+            taskEXIT_CRITICAL();
+            initialized_ = false;
+            recovery_required_ = true;
+            return false;
         }
 
         taskENTER_CRITICAL();
@@ -50,11 +58,22 @@ public:
                 ROBOT_PWM_NEUTRAL_US, ROBOT_PWM_NEUTRAL_US,
             };
             last_write_ok_ = PCA9685_SetAllPWM(neutral);
+            if (!last_write_ok_) {
+                taskENTER_CRITICAL();
+                robot.actuator_output_ready = false;
+                taskEXIT_CRITICAL();
+                initialized_ = false;
+                recovery_required_ = true;
+                return false;
+            }
         }
+        return true;
     }
 
+    bool RecoverToNeutral() { return Init(); }
     bool is_ready() const { return initialized_; }
     bool last_write_ok() const { return last_write_ok_; }
+    bool recovery_required() const { return recovery_required_; }
 
 private:
     static bool output_generation_matches(
@@ -76,4 +95,5 @@ private:
     float freq_;
     bool initialized_ = false;
     bool last_write_ok_ = false;
+    bool recovery_required_ = false;
 };

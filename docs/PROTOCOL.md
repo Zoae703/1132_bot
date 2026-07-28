@@ -75,10 +75,46 @@ PWM values, protocol error count, missed-heartbeat count, neutral reason, and
 active manual-test channel (`0xFF` means none).
 
 Neutral reasons are `NONE`, `COMMAND`, `PWM_COMMAND_TIMEOUT`, `COMM_LOST`,
-`DISARM`, `EMERGENCY_STOP`, `LAST_CLIENT_DISCONNECTED`, and `FAULT`.
+`DISARM`, `EMERGENCY_STOP`, `LAST_CLIENT_DISCONNECTED`, `FAULT`, and
+`DEPTH_SENSOR`.
 
 An ACK means that a command was accepted. Only a later STATUS_REPORT is proof of
 the current safety state and confirmed PWM output.
+
+## Depth-hold control
+
+Depth errors are in centimetres; PID terms and output are PWM microseconds.
+The existing discrete PID updates once per successful MS5837 sample.
+
+| Message | Type | Payload |
+| --- | ---: | --- |
+| `FLOAT_ON` / `FLOAT_OFF` | `0x30` / `0x31` | Empty |
+| `SET_DEPTH` | `0x34` | `<f` target depth in cm |
+| `SET_DEPTH_PID_TUNING` | `0x3B` | `<7f`: Kp, Ki, Kd, P/I/D limits, output limit |
+| `REQUEST_DEPTH_PID_TUNING` | `0x43` | Empty |
+| `REQUEST_DEPTH_CONTROL` | `0x44` | Empty |
+| `DEPTH_PID_TUNING_REPORT` | `0x83` | Same 28-byte tuning payload |
+| `DEPTH_CONTROL_REPORT` | `0x84` | `<8fIBBH`, 40 bytes |
+
+`FLOAT_ON` is accepted only from `ARMED_IDLE` with a ready actuator and a fresh,
+finite MS5837 sample that can seed a `0..300m` target. It captures the current
+depth without adding a step. A missing, stale, or out-of-range sample is rejected
+with all PWM at `1500us`.
+
+While depth hold is active, `SET_DEPTH` also renews a 500ms command lease.
+Diagnostic requests never renew that lease. If renewal stops, the firmware
+clears depth hold, returns to `ARMED_IDLE`, and forces all eight outputs to
+`1500us`.
+
+`DEPTH_CONTROL_REPORT` contains requested target, active setpoint, measured
+depth, error, P/I/D terms, total PID output, sample age, a fault reason, and:
+
+- bit 0: depth hold enabled
+- bit 1: sensor initialized
+- bit 2: sample fresh and valid
+- bit 3: PID output saturated
+- bit 4: vertical mixer saturated
+- bit 5: actuator output ready
 
 ## Streaming and recovery
 

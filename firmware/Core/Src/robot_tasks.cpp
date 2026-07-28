@@ -7,6 +7,10 @@
 #include "binary_protocol.h"
 
 static volatile bool pca9685_ready = false;
+volatile bool pca9685_recovery_in_progress = true;
+static constexpr uint8_t PCA9685_INIT_ATTEMPTS = 3U;
+static constexpr uint32_t PCA9685_INIT_RETRY_MS = 100U;
+static constexpr uint32_t PCA9685_RECOVERY_RETRY_MS = 750U;
 
 /* ------------------------------------------------------------------ */
 /*  Unified failsafe neutral                                           */
@@ -20,7 +24,10 @@ static void SetControlFailsafeNeutralLocked(uint8_t reason)
   robot.body_control_enabled = false;
   robot.manual_pwm_enabled = false;
   robot.active_test_channel = 0xFF;
+  robot.depth_command_last_ms = 0U;
   robot.last_neutral_reason = reason;
+  reset_depth_control_runtime(robot);
+  robot.depth_control_fault_reason = reason;
   force_body_output_neutral(robot);
   for (int i = 0; i < 8; i++)
   {
@@ -220,15 +227,54 @@ extern "C" void ControlTaskFunc(void *argument)
   (void)argument;
 
   motor_control.Init();
-  pca9685.Init();
-  pca9685_ready = pca9685.is_ready();
-  if (pca9685_ready)
+  pca9685_recovery_in_progress = true;
+  taskENTER_CRITICAL();
+  robot.actuator_output_ready = false;
+  taskEXIT_CRITICAL();
+
+  for (uint8_t attempt = 0U;
+       attempt < PCA9685_INIT_ATTEMPTS && !pca9685_ready;
+       ++attempt)
   {
-    SetControlFailsafeNeutral(ProtoNeutral_NONE);
-    pca9685.Update();
+    pca9685_ready = pca9685.Init();
+    if (!pca9685_ready && (attempt + 1U) < PCA9685_INIT_ATTEMPTS)
+    {
+      vTaskDelay(pdMS_TO_TICKS(PCA9685_INIT_RETRY_MS));
+    }
   }
 
-  bool pca_error_logged = false;
+  taskENTER_CRITICAL();
+  if (pca9685_ready)
+  {
+    /*
+     * PCA9685_Init() has already written and read back neutral on all sixteen
+     * channels. Keep the software image in sync without adding an un-retried
+     * I2C write after the three initialization attempts.
+     */
+    SetControlFailsafeNeutralLocked(
+        robot.estop_locked ? ProtoNeutral_EMERGENCY_STOP
+                           : ProtoNeutral_NONE);
+    robot.actuator_output_ready = true;
+    pca9685_recovery_in_progress = false;
+  }
+  else
+  {
+    const bool estop_was_locked =
+        robot.estop_locked ||
+        robot.state == RobotState::EMERGENCY_STOP;
+    SetControlFailsafeNeutralLocked(
+        estop_was_locked ? ProtoNeutral_EMERGENCY_STOP
+                         : ProtoNeutral_FAULT);
+    robot.actuator_output_ready = false;
+    robot.estop_locked = estop_was_locked;
+    robot.state = estop_was_locked
+                      ? RobotState::EMERGENCY_STOP
+                      : RobotState::FAULT;
+    robot.state_changed_ms = HAL_GetTick();
+  }
+  taskEXIT_CRITICAL();
+
+  uint32_t last_pca_recovery_ms = HAL_GetTick();
   TickType_t last_wake = xTaskGetTickCount();
 
   for (;;)
@@ -255,11 +301,51 @@ extern "C" void ControlTaskFunc(void *argument)
     state = robot.state;
     taskEXIT_CRITICAL();
 
-    if (estop_locked && state == RobotState::EMERGENCY_STOP)
+    const bool pca_recovery_needed =
+        !pca9685_ready && pca9685.recovery_required();
+    if ((estop_locked && state == RobotState::EMERGENCY_STOP) ||
+        (state == RobotState::FAULT && pca_recovery_needed))
     {
-      SetControlFailsafeNeutral(ProtoNeutral_EMERGENCY_STOP);
+      SetControlFailsafeNeutral(
+          pca9685_ready && estop_locked
+              ? ProtoNeutral_EMERGENCY_STOP
+                        : ProtoNeutral_FAULT);
       if (pca9685_ready)
-        pca9685.Update();
+      {
+        pca9685_ready = pca9685.Update();
+        if (!pca9685_ready)
+        {
+          pca9685_recovery_in_progress = true;
+          taskENTER_CRITICAL();
+          SetControlFailsafeNeutralLocked(ProtoNeutral_FAULT);
+          robot.actuator_output_ready = false;
+          robot.estop_locked = true;
+          robot.state = RobotState::EMERGENCY_STOP;
+          robot.state_changed_ms = now;
+          taskEXIT_CRITICAL();
+          last_pca_recovery_ms = now;
+        }
+      }
+      else if (pca9685.recovery_required() &&
+               (now - last_pca_recovery_ms) >=
+                   PCA9685_RECOVERY_RETRY_MS)
+      {
+        last_pca_recovery_ms = now;
+        pca9685_recovery_in_progress = true;
+        const bool recovered = pca9685.RecoverToNeutral();
+        if (recovered)
+        {
+          /*
+           * RecoverToNeutral() performs the same sixteen-channel neutral
+           * write and readback as startup initialization.
+           */
+          pca9685_recovery_in_progress = false;
+          pca9685_ready = true;
+          taskENTER_CRITICAL();
+          robot.actuator_output_ready = true;
+          taskEXIT_CRITICAL();
+        }
+      }
       vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(20));
       continue;
     }
@@ -267,11 +353,15 @@ extern "C" void ControlTaskFunc(void *argument)
     /* --- General control-command timeout --- */
     bool control_enable;
     bool body_control_enabled;
+    bool float_enabled;
     uint32_t last_cmd_tick;
+    uint32_t depth_command_last_ms;
     taskENTER_CRITICAL();
     control_enable = robot.control_enable;
     body_control_enabled = robot.body_control_enabled;
+    float_enabled = robot.float_enabled;
     last_cmd_tick  = robot.last_cmd_tick;
+    depth_command_last_ms = robot.depth_command_last_ms;
     taskEXIT_CRITICAL();
 
     if (state == RobotState::DISARMED ||
@@ -295,16 +385,26 @@ extern "C" void ControlTaskFunc(void *argument)
       taskEXIT_CRITICAL();
     }
     else if (control_enable && !body_control_enabled &&
-             ((now - last_cmd_tick) > ROBOT_COMMAND_TIMEOUT_MS))
+             ((now - (float_enabled
+                          ? depth_command_last_ms
+                          : last_cmd_tick)) >
+              ROBOT_COMMAND_TIMEOUT_MS))
     {
       taskENTER_CRITICAL();
       if (robot.control_enable &&
           !robot.body_control_enabled &&
+          robot.float_enabled == float_enabled &&
           robot.state == state &&
           robot.last_cmd_tick == last_cmd_tick &&
-          ((now - robot.last_cmd_tick) > ROBOT_COMMAND_TIMEOUT_MS))
+          robot.depth_command_last_ms == depth_command_last_ms &&
+          ((now - (robot.float_enabled
+                       ? robot.depth_command_last_ms
+                       : robot.last_cmd_tick)) >
+           ROBOT_COMMAND_TIMEOUT_MS))
       {
         SetControlFailsafeNeutralLocked(ProtoNeutral_COMMAND);
+        robot.state = RobotState::ARMED_IDLE;
+        robot.state_changed_ms = now;
       }
       taskEXIT_CRITICAL();
     }
@@ -315,21 +415,22 @@ extern "C" void ControlTaskFunc(void *argument)
     /* --- PCA9685 output --- */
     if (pca9685_ready)
     {
-      pca9685.Update();
-      if (!pca9685.last_write_ok())
+      pca9685_ready = pca9685.Update();
+      if (!pca9685_ready)
       {
-        /* PCA9685 I2C write failure → ESTOP */
-        SetControlFailsafeNeutral(ProtoNeutral_FAULT);
+        pca9685_recovery_in_progress = true;
+        /*
+         * The low-level driver has already attempted ALL_LED full-off.
+         * Latch ESTOP and do not permit reset until neutral recovery verifies.
+         */
         taskENTER_CRITICAL();
+        SetControlFailsafeNeutralLocked(ProtoNeutral_FAULT);
+        robot.actuator_output_ready = false;
         robot.estop_locked = true;
         robot.state = RobotState::EMERGENCY_STOP;
         robot.state_changed_ms = now;
         taskEXIT_CRITICAL();
-        pca_error_logged = true;
-      }
-      else
-      {
-        pca_error_logged = false;
+        last_pca_recovery_ms = now;
       }
     }
 

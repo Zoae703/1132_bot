@@ -5,8 +5,9 @@ All endpoints validate input and enforce safety constraints before
 forwarding commands to the STM32 via Stm32Proxy.
 """
 
-import logging
 import asyncio
+import logging
+import math
 import time
 import uuid
 from typing import Optional
@@ -23,8 +24,7 @@ from pydantic import (
 from opi_console.serial_transport import SerialTransport
 from opi_console.stm32_proxy import Stm32Proxy
 from opi_console.config import AppConfig, coerce_config
-from protocol import SafetyState
-from protocol import MotionTuning, SetBodyCommand
+from protocol import DepthPidTuning, MotionTuning, SafetyState, SetBodyCommand
 from web_backend.ws_manager import WebSocketManager
 from web_backend.control_state import ControlState
 from web_backend.control_arbiter import (
@@ -116,6 +116,7 @@ class FeatureCapabilitiesResponse(BaseModel):
     gamepad_control: bool
     sensor_stream: bool
     emergency_stop: bool
+    depth_hold: bool = False
 
 
 class MotionTuningCapabilitiesResponse(BaseModel):
@@ -130,6 +131,22 @@ class MotionTuningCapabilitiesResponse(BaseModel):
     pwm_slew_rate_max_us_per_s: int
     command_timeout_min_ms: int
     command_timeout_max_ms: int
+
+
+class DepthPidCapabilitiesResponse(BaseModel):
+    kp_min: float
+    kp_max: float
+    ki_min: float
+    ki_max: float
+    kd_min: float
+    kd_max: float
+    term_limit_min_us: float
+    term_limit_max_us: float
+    output_limit_min_us: float
+    output_limit_max_us: float
+    target_depth_min_m: float
+    target_depth_max_m: float
+    lease_timeout_ms: int
 
 
 class TelemetryCapabilitiesResponse(BaseModel):
@@ -165,6 +182,7 @@ class CapabilitiesResponse(BaseModel):
     pwm: PwmCapabilitiesResponse
     features: FeatureCapabilitiesResponse
     motion_tuning: MotionTuningCapabilitiesResponse
+    depth_pid: Optional[DepthPidCapabilitiesResponse] = None
     gamepad: GamepadCapabilitiesResponse
     telemetry: TelemetryCapabilitiesResponse
     sensor_poll_hz: float
@@ -189,6 +207,30 @@ class BodyCommandRequest(BaseModel):
     roll: float = Field(default=0.0, ge=-1.0, le=1.0)
     pitch: float = Field(default=0.0, ge=-1.0, le=1.0)
     yaw: float = Field(default=0.0, ge=-1.0, le=1.0)
+
+
+class DepthPidTuningRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    kp: float = Field(ge=0.0, le=100.0)
+    ki: float = Field(ge=0.0, le=10.0)
+    kd: float = Field(ge=0.0, le=100.0)
+    p_limit_us: float = Field(ge=0.0, le=200.0)
+    i_limit_us: float = Field(ge=0.0, le=200.0)
+    d_limit_us: float = Field(ge=0.0, le=200.0)
+    output_limit_us: float = Field(ge=1.0, le=200.0)
+
+
+class DepthEnableRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    target_depth_m: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+
+
+class DepthTargetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    target_depth_m: float = Field(ge=0.0, le=300.0)
 
 
 # ============================================================================
@@ -223,6 +265,15 @@ def create_api_router(
 
     def _online_state():
         state = proxy.refresh_link_state()
+        control.reconcile_depth_hold(
+            state.safety_state,
+            bool(state.flags & 0x02),
+            link_ready=bool(
+                transport.connected
+                and state.stm32_online
+                and not state.status_stale
+            ),
+        )
         if not transport.connected:
             raise HTTPException(503, "Serial transport is not connected")
         if not state.stm32_online or state.status_stale:
@@ -277,6 +328,108 @@ def create_api_router(
             raise HTTPException(503, "Gamepad control service is unavailable")
         return gamepad_service
 
+    def _depth_feature_enabled() -> bool:
+        return bool(getattr(app_config.features, "depth_hold", False))
+
+    def _require_depth_feature():
+        if not _depth_feature_enabled():
+            raise HTTPException(403, "Depth-hold feature is disabled")
+
+    def _depth_report_value(report, name: str, default=None):
+        if isinstance(report, dict):
+            return report.get(name, default)
+        return getattr(report, name, default)
+
+    def _depth_control_payload(report) -> dict:
+        if report is None:
+            return {}
+
+        def number(name: str):
+            value = _depth_report_value(report, name)
+            return (
+                float(value)
+                if isinstance(value, (int, float)) and math.isfinite(value)
+                else None
+            )
+
+        def cm_to_m(name: str):
+            value = number(name)
+            return value / 100.0 if value is not None else None
+
+        return {
+            "enabled": bool(_depth_report_value(report, "enabled", False)),
+            "depth_sensor_ready": bool(
+                _depth_report_value(report, "sensor_ready", False)),
+            "depth_sample_valid": bool(
+                _depth_report_value(report, "sample_fresh_valid", False)),
+            "depth_pid_saturated": bool(
+                _depth_report_value(report, "pid_saturated", False)),
+            "vertical_saturated": bool(
+                _depth_report_value(report, "vertical_saturated", False)),
+            "depth_actuator_ready": bool(
+                _depth_report_value(report, "actuator_ready", False)),
+            "depth_requested_target_m": cm_to_m("requested_target_cm"),
+            "depth_active_setpoint_m": cm_to_m("active_setpoint_cm"),
+            "depth_measured_m": cm_to_m("measured_depth_cm"),
+            "depth_error_m": cm_to_m("error_cm"),
+            "depth_pid_p_us": number("p_term_us"),
+            "depth_pid_i_us": number("i_term_us"),
+            "depth_pid_d_us": number("d_term_us"),
+            "depth_pid_output_us": number("output_us"),
+            "depth_sample_age_ms": number("sample_age_ms"),
+            "fault_reason": _depth_report_value(report, "fault_reason"),
+        }
+
+    def _depth_diagnostics_ready(report) -> bool:
+        return bool(
+            report is not None
+            and _depth_report_value(report, "sensor_ready", False)
+            and _depth_report_value(report, "sample_fresh_valid", False)
+            and _depth_report_value(report, "actuator_ready", False)
+        )
+
+    def _depth_measurement_can_seed_target(state) -> bool:
+        return bool(
+            not state.sensors_stale
+            and isinstance(state.depth_m, (int, float))
+            and not isinstance(state.depth_m, bool)
+            and math.isfinite(state.depth_m)
+            and 0.0 <= state.depth_m <= 300.0
+        )
+
+    def _depth_state_is_neutral_idle(state) -> bool:
+        return bool(
+            state.safety_state == SafetyState.ARMED_IDLE
+            and not bool(state.flags & 0x02)
+            and list(state.pwm) == [pwm_config.neutral_us] * pwm_config.channel_count
+        )
+
+    async def _rollback_depth_enable(reason: str) -> dict:
+        result = {"disable": False, "neutral": False}
+        try:
+            result["disable"] = await proxy.disable_depth_hold()
+        except Exception:
+            logger.exception("Depth-hold rollback disable failed: %s", reason)
+        try:
+            result["neutral"] = await proxy.force_neutral(
+                reason=f"depth_hold_rollback:{reason}",
+                confirm=True,
+            )
+        except Exception:
+            logger.exception("Depth-hold rollback neutral failed: %s", reason)
+        result["safe"] = bool(
+            result["neutral"]
+            or (
+                result["disable"]
+                and _depth_state_is_neutral_idle(
+                    proxy.refresh_link_state())
+            )
+        )
+        control.arbiter.force_idle(reason)
+        if not result["safe"]:
+            control.inhibit_motion(f"{reason}_neutral_unconfirmed")
+        return result
+
     # ---- GET /api/capabilities ----
 
     @router.get("/capabilities", response_model=CapabilitiesResponse)
@@ -288,6 +441,15 @@ def create_api_router(
     @router.get("/status")
     async def get_status():
         state = proxy.refresh_link_state()
+        control.reconcile_depth_hold(
+            state.safety_state,
+            bool(state.flags & 0x02),
+            link_ready=bool(
+                transport.connected
+                and state.stm32_online
+                and not state.status_stale
+            ),
+        )
         state_dict = state.to_dict()
         return {
             "mode": _mode(),
@@ -398,6 +560,394 @@ def create_api_router(
         return {
             "status": "ok",
             **proxy.motion_tuning_snapshot(),
+        }
+
+    # ---- GET/POST /api/depth ----
+
+    @router.get("/depth/tuning")
+    async def get_depth_tuning():
+        _require_depth_feature()
+        return proxy.depth_pid_tuning_snapshot()
+
+    @router.post("/depth/tuning")
+    async def set_depth_tuning(req: DepthPidTuningRequest):
+        _require_depth_feature()
+        _reject_during_safety_transition()
+        tuning = DepthPidTuning(**req.model_dump())
+        async with control.lock:
+            _reject_during_safety_transition()
+            state = _online_state()
+            if state.safety_state not in (
+                SafetyState.DISARMED,
+                SafetyState.ARMED_IDLE,
+            ):
+                raise HTTPException(
+                    409,
+                    "Depth PID tuning can only be applied while stopped "
+                    "(DISARMED or ARMED_IDLE)",
+                )
+            if bool(state.flags & 0x02):
+                raise HTTPException(
+                    409, "Disable depth hold before applying PID tuning")
+            if control.arbiter.mode != ControlMode.IDLE:
+                raise HTTPException(
+                    409,
+                    "Depth PID tuning requires the control arbiter to be IDLE",
+                )
+            try:
+                ok = await proxy.set_depth_pid_tuning(tuning, persist=True)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            except OSError as exc:
+                logger.error("Failed to persist depth PID tuning: %s", exc)
+                raise HTTPException(
+                    500, f"Failed to persist depth PID tuning: {exc}") from exc
+        if not ok:
+            snapshot = proxy.depth_pid_tuning_snapshot()
+            reason = (
+                snapshot.get("sync_error")
+                or _failure_reason("depth PID tuning confirmation failed")
+            )
+            raise HTTPException(_command_failure_status(), reason)
+        return {
+            "status": "ok",
+            **proxy.depth_pid_tuning_snapshot(),
+        }
+
+    @router.get("/depth/control")
+    async def get_depth_control():
+        _require_depth_feature()
+        state = _online_state()
+        report = await proxy.request_depth_control()
+        if report is None:
+            raise HTTPException(
+                _command_failure_status(),
+                _failure_reason("depth-control report timeout"),
+            )
+        control.reconcile_depth_hold(
+            state.safety_state,
+            bool(_depth_report_value(report, "enabled", False)),
+            link_ready=bool(
+                transport.connected
+                and state.stm32_online
+                and not state.status_stale
+            ),
+        )
+        return {
+            "status": "ok",
+            "control_mode": control.arbiter.mode.value,
+            "control": _depth_control_payload(report),
+        }
+
+    @router.post("/depth/enable")
+    async def enable_depth_hold(req: Optional[DepthEnableRequest] = None):
+        _require_depth_feature()
+        _reject_motion_inhibit()
+        _reject_during_safety_transition()
+        target_depth_m = req.target_depth_m if req is not None else None
+        failure: Optional[tuple[int, str]] = None
+        response_report = None
+        async with control.lock:
+            _reject_during_safety_transition()
+            state = _online_state()
+            if state.safety_state != SafetyState.ARMED_IDLE:
+                raise HTTPException(
+                    409, "Must be ARMED_IDLE to enable depth hold")
+            if not _depth_measurement_can_seed_target(state):
+                raise HTTPException(
+                    409,
+                    "Depth sensor telemetry cannot seed a safe 0..300m target",
+                )
+
+            diagnostics = await proxy.request_depth_control()
+            if diagnostics is None:
+                raise HTTPException(
+                    _command_failure_status(),
+                    _failure_reason("depth-control diagnostics timeout"),
+                )
+            if not _depth_diagnostics_ready(diagnostics):
+                payload = _depth_control_payload(diagnostics)
+                raise HTTPException(
+                    409,
+                    "Depth hold is not ready: "
+                    f"sensor_ready={payload['depth_sensor_ready']} "
+                    f"sample_valid={payload['depth_sample_valid']} "
+                    f"actuator_ready={payload['depth_actuator_ready']} "
+                    f"fault={payload['fault_reason']}",
+                )
+
+            tuning_ok = await proxy.ensure_depth_pid_tuning_synced()
+            if not tuning_ok:
+                snapshot = proxy.depth_pid_tuning_snapshot()
+                raise HTTPException(
+                    _command_failure_status(),
+                    snapshot.get("sync_error")
+                    or _failure_reason("depth PID tuning is not synchronized"),
+                )
+
+            # Synchronization performs serial I/O, so re-check all safety gates
+            # immediately before acquiring ownership and enabling thrust.
+            state = _online_state()
+            if (
+                state.safety_state != SafetyState.ARMED_IDLE
+                or not _depth_measurement_can_seed_target(state)
+            ):
+                raise HTTPException(
+                    409, "Depth-hold preconditions changed during tuning sync")
+            diagnostics = await proxy.request_depth_control()
+            if diagnostics is None:
+                raise HTTPException(
+                    _command_failure_status(),
+                    _failure_reason(
+                        "depth-control readiness recheck timed out"),
+                )
+            if not _depth_diagnostics_ready(diagnostics):
+                raise HTTPException(
+                    409,
+                    "Depth-control readiness changed during tuning sync")
+
+            _acquire_mode(ControlMode.DEPTH_HOLD)
+            try:
+                enabled = await proxy.enable_depth_hold()
+                target_ok = True
+                if enabled and target_depth_m is not None:
+                    target_ok = await proxy.set_depth_cm(
+                        target_depth_m * 100.0)
+                if not enabled or not target_ok:
+                    raise RuntimeError(
+                        "FLOAT_ON confirmation failed"
+                        if not enabled else "SET_DEPTH confirmation failed")
+
+                response_report = await proxy.request_depth_control()
+                if (
+                    response_report is None
+                    or not _depth_report_value(
+                        response_report, "enabled", False)
+                ):
+                    raise RuntimeError(
+                        "depth-control report did not confirm enabled state")
+                if target_depth_m is not None:
+                    confirmed_cm = _depth_report_value(
+                        response_report, "requested_target_cm")
+                    if (
+                        not isinstance(confirmed_cm, (int, float))
+                        or not math.isfinite(confirmed_cm)
+                        or not math.isclose(
+                            float(confirmed_cm),
+                            target_depth_m * 100.0,
+                            rel_tol=0.0,
+                            abs_tol=0.01,
+                        )
+                    ):
+                        raise RuntimeError(
+                            "depth-control report did not confirm target")
+            except asyncio.CancelledError:
+                await _rollback_depth_enable(
+                    "depth_hold_enable_cancelled")
+                raise
+            except Exception as exc:
+                reason = str(exc) or "depth_hold_enable_failed"
+                rollback = await _rollback_depth_enable(
+                    "depth_hold_enable_failed")
+                failure = (
+                    _command_failure_status(),
+                    f"{reason}; rollback FLOAT_OFF="
+                    f"{'confirmed' if rollback['disable'] else 'unconfirmed'}, "
+                    "neutral="
+                    f"{'confirmed' if rollback['neutral'] else 'unconfirmed'}",
+                )
+
+        if failure is not None:
+            raise HTTPException(*failure)
+        return {
+            "status": "ok",
+            "message": "Depth hold enabled",
+            "control": _depth_control_payload(response_report),
+        }
+
+    async def _set_depth_target(
+        target_depth_m: float,
+        *,
+        confirm_report: bool,
+        operation: str,
+    ) -> dict:
+        _require_depth_feature()
+        _reject_motion_inhibit()
+        _reject_during_safety_transition()
+        failure: Optional[tuple[int, str]] = None
+        response_report = None
+        async with control.lock:
+            _reject_during_safety_transition()
+            _require_mode(ControlMode.DEPTH_HOLD)
+            state = _online_state()
+            if (
+                state.safety_state != SafetyState.ARMED_ACTIVE
+                or not bool(state.flags & 0x02)
+            ):
+                control.arbiter.force_idle(
+                    "firmware_depth_hold_inactive")
+                raise HTTPException(409, "Depth hold is not enabled")
+            if state.sensors_stale or not math.isfinite(state.depth_m):
+                raise HTTPException(
+                    409, "Depth sensor telemetry is stale or invalid")
+
+            try:
+                ok = await proxy.set_depth_cm(target_depth_m * 100.0)
+                if not ok:
+                    raise RuntimeError(f"{operation} confirmation failed")
+                if confirm_report:
+                    response_report = await proxy.request_depth_control()
+                    confirmed_cm = _depth_report_value(
+                        response_report, "requested_target_cm")
+                    if (
+                        response_report is None
+                        or not _depth_report_value(
+                            response_report, "enabled", False)
+                        or not isinstance(confirmed_cm, (int, float))
+                        or not math.isfinite(confirmed_cm)
+                        or not math.isclose(
+                            float(confirmed_cm),
+                            target_depth_m * 100.0,
+                            rel_tol=0.0,
+                            abs_tol=0.01,
+                        )
+                    ):
+                        raise RuntimeError(
+                            "depth-control report did not confirm target")
+            except asyncio.CancelledError:
+                await _rollback_depth_enable(
+                    f"{operation}_cancelled")
+                raise
+            except Exception as exc:
+                rollback = await _rollback_depth_enable(
+                    f"{operation}_failed")
+                failure = (
+                    _command_failure_status(),
+                    f"{exc}; rollback FLOAT_OFF="
+                    f"{'confirmed' if rollback['disable'] else 'unconfirmed'}, "
+                    "neutral="
+                    f"{'confirmed' if rollback['neutral'] else 'unconfirmed'}",
+                )
+
+        if failure is not None:
+            raise HTTPException(*failure)
+        result = {
+            "status": "ok",
+            "target_depth_m": target_depth_m,
+        }
+        if response_report is not None:
+            result["control"] = _depth_control_payload(response_report)
+        return result
+
+    @router.post("/depth/target")
+    async def set_depth_target(req: DepthTargetRequest):
+        return await _set_depth_target(
+            req.target_depth_m,
+            confirm_report=True,
+            operation="depth_target",
+        )
+
+    @router.post("/depth/keepalive")
+    async def keepalive_depth_hold(req: DepthTargetRequest):
+        return await _set_depth_target(
+            req.target_depth_m,
+            confirm_report=False,
+            operation="depth_keepalive",
+        )
+
+    @router.post("/depth/disable")
+    async def disable_depth_hold():
+        _require_depth_feature()
+        _reject_during_safety_transition()
+        failure: Optional[tuple[int, str]] = None
+        async with control.lock:
+            _reject_during_safety_transition()
+            state = _online_state()
+            if (
+                control.arbiter.mode == ControlMode.IDLE
+                and (
+                    _depth_state_is_neutral_idle(state)
+                    or (
+                        state.safety_state in (
+                            SafetyState.DISARMED,
+                            SafetyState.EMERGENCY_STOP,
+                        )
+                        and not bool(state.flags & 0x02)
+                        and list(state.pwm)
+                        == [pwm_config.neutral_us] * pwm_config.channel_count
+                    )
+                )
+            ):
+                return {
+                    "status": "ok",
+                    "message": "Depth hold already disabled and PWM neutral",
+                }
+
+            unowned_firmware_active = bool(
+                control.arbiter.mode == ControlMode.IDLE
+                and state.safety_state == SafetyState.ARMED_ACTIVE
+                and bool(state.flags & 0x02)
+            )
+            if not unowned_firmware_active:
+                _require_mode(ControlMode.DEPTH_HOLD)
+            if _depth_state_is_neutral_idle(state):
+                control.arbiter.release(
+                    ControlMode.DEPTH_HOLD,
+                    "web",
+                    "depth_hold_already_safe",
+                )
+                return {
+                    "status": "ok",
+                    "message": "Depth hold already disabled and PWM neutral",
+                }
+
+            try:
+                command_ok = await proxy.disable_depth_hold()
+            except Exception:
+                logger.exception("Unexpected FLOAT_OFF failure")
+                command_ok = False
+            state = proxy.refresh_link_state()
+            confirmed = command_ok and _depth_state_is_neutral_idle(state)
+
+            if not confirmed:
+                neutral_ok = False
+                try:
+                    neutral_ok = await proxy.force_neutral(
+                        reason="depth_hold_disable_unconfirmed",
+                        confirm=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Force neutral failed after unconfirmed FLOAT_OFF")
+                state = proxy.refresh_link_state()
+                confirmed = (
+                    neutral_ok and _depth_state_is_neutral_idle(state))
+
+            if confirmed:
+                if control.arbiter.mode == ControlMode.DEPTH_HOLD:
+                    control.arbiter.release(
+                        ControlMode.DEPTH_HOLD,
+                        "web",
+                        "depth_hold_disabled",
+                    )
+                else:
+                    control.arbiter.force_idle(
+                        "unowned_depth_hold_disabled")
+            else:
+                control.inhibit_motion(
+                    "depth_hold_disable_unconfirmed")
+                failure = (
+                    _command_failure_status(),
+                    _failure_reason(
+                        "FLOAT_OFF did not confirm ARMED_IDLE, float disabled, "
+                        "and all PWM neutral"),
+                )
+
+        if failure is not None:
+            raise HTTPException(*failure)
+        return {
+            "status": "ok",
+            "message": "Depth hold disabled and PWM neutral",
         }
 
     # ---- POST /api/motion/enable ----
@@ -872,6 +1422,7 @@ def create_api_router(
             ok = await proxy.force_neutral("api_pwm_neutral")
             if ok:
                 control.active_test_channel = None
+                control.arbiter.force_idle("api_pwm_neutral")
         if not ok:
             reason = _failure_reason("ACK or status confirmation timeout")
             _remember_error(f"PWM neutral failed: {reason}")

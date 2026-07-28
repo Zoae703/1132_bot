@@ -28,6 +28,7 @@ function validCapabilities() {
       manual_pwm: true,
       motor_mapping: true,
       motion_tuning: true,
+      depth_hold: true,
       gamepad_control: true,
       sensor_stream: true,
       emergency_stop: true,
@@ -44,6 +45,21 @@ function validCapabilities() {
       pwm_slew_rate_max_us_per_s: 5000,
       command_timeout_min_ms: 200,
       command_timeout_max_ms: 2000,
+    },
+    depth_pid: {
+      kp_min: 0,
+      kp_max: 100,
+      ki_min: 0,
+      ki_max: 20,
+      kd_min: 0,
+      kd_max: 100,
+      term_limit_min_us: 0,
+      term_limit_max_us: 300,
+      output_limit_min_us: 0,
+      output_limit_max_us: 400,
+      target_depth_min_m: 0,
+      target_depth_max_m: 20,
+      lease_timeout_ms: 800,
     },
     gamepad: {
       axis_count: 6,
@@ -79,7 +95,9 @@ test('locked capabilities cannot command movement', () => {
   assert.equal(LOCKED_CAPABILITIES.pwm.min_test_us, 1500);
   assert.equal(LOCKED_CAPABILITIES.pwm.max_test_us, 1500);
   assert.equal(LOCKED_CAPABILITIES.features.motion_tuning, false);
+  assert.equal(LOCKED_CAPABILITIES.features.depth_hold, false);
   assert.equal(LOCKED_CAPABILITIES.features.gamepad_control, false);
+  assert.equal(LOCKED_CAPABILITIES.depth_pid.output_limit_max_us, 0);
   assert.equal(LOCKED_CAPABILITIES.gamepad.global_scale, 0);
 });
 
@@ -124,4 +142,34 @@ test('neutral, PWM bounds, and duration invariants are enforced', () => {
     () => normalizeCapabilities(invalidGamepadTimeout),
     /手柄能力配置/,
   );
+
+  const invalidDepthRange = validCapabilities();
+  invalidDepthRange.depth_pid.target_depth_min_m = 30;
+  assert.throws(
+    () => normalizeCapabilities(invalidDepthRange),
+    /定深 PID 能力配置/,
+  );
+
+  const shortLease = validCapabilities();
+  shortLease.depth_pid.lease_timeout_ms = 200;
+  assert.throws(
+    () => normalizeCapabilities(shortLease),
+    /定深 PID 能力配置/,
+  );
+});
+
+test('depth capability requires limits only when depth hold is enabled', () => {
+  const missingEnabled = validCapabilities();
+  delete missingEnabled.depth_pid;
+  assert.throws(
+    () => normalizeCapabilities(missingEnabled),
+    /depth_pid/,
+  );
+
+  const disabled = validCapabilities();
+  disabled.features.depth_hold = false;
+  delete disabled.depth_pid;
+  const normalized = normalizeCapabilities(disabled);
+  assert.equal(normalized.features.depth_hold, false);
+  assert.deepEqual(normalized.depth_pid, LOCKED_CAPABILITIES.depth_pid);
 });

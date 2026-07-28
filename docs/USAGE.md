@@ -1466,7 +1466,7 @@ USART6 同时保留 legacy 文本命令，串口参数为 `115200 8N1`。每条�
 | 命令 | 作用 |
 | --- | --- |
 | `PING` | 返回 `PONG`，用于连通性检查 |
-| `ON` | 开启定深控制，目标深度取当前深度或至少 `30cm` |
+| `ON` | 开启定深控制；仅在传感器新鲜且当前深度可作为合法目标时捕获当前深度 |
 | `OFF` / `NEU` | 关闭控制，所有手动 PWM 回中位 |
 | `TES:1500,1500,...` | 设置 8 路手动 PWM，最多 8 个逗号分隔值 |
 | `UP` | 目标深度减小 `1cm` |
@@ -1503,6 +1503,9 @@ USART6 同时保留 legacy 文本命令，串口参数为 `115200 8N1`。每条�
 - `SET_MOTION_TUNING` / `REQUEST_MOTION_TUNING` /
   `MOTION_TUNING_REPORT`
 - `FLOAT_ON` / `FLOAT_OFF`
+- `SET_DEPTH_PID_TUNING` / `REQUEST_DEPTH_PID_TUNING` /
+  `DEPTH_PID_TUNING_REPORT`
+- `REQUEST_DEPTH_CONTROL` / `DEPTH_CONTROL_REPORT`
 - `ANGLE_ON` / `ANGLE_OFF`
 - `SET_DEPTH` / `SET_YAW` / `SET_MOTION`
 - `REQUEST_STATUS` / `REQUEST_SENSORS`

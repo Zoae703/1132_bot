@@ -24,6 +24,15 @@ test('normalizeStatus uses fail-safe defaults for missing dangerous fields', () 
   assert.equal(status.estop_locked, true);
   assert.equal(status.body_control_enabled, false);
   assert.equal(status.motion_tuning_synced, false);
+  assert.equal(status.depth_sensor_ready, false);
+  assert.equal(status.depth_sample_valid, false);
+  assert.equal(status.depth_sample_age_ms, null);
+  assert.equal(status.depth_actuator_ready, false);
+  assert.equal(status.depth_pid_tuning_synced, false);
+  assert.equal(status.depth_pid_tuning_sync_state, 'pending');
+  assert.equal(Number.isNaN(status.depth_active_setpoint_m), true);
+  assert.equal(Number.isNaN(status.depth_pid_output_us), true);
+  assert.equal(status.last_depth_control_report_at, 0);
   assert.equal(status.control_mode, 'UNKNOWN');
   assert.equal(status.gamepad.client_connected, false);
   assert.equal(status.gamepad.eligibility_reason, 'no_gamepad_frame');
@@ -87,6 +96,46 @@ test('normalizeStatus exposes six-axis and saturation state', () => {
   assert.equal(status.vertical_saturated, false);
   assert.equal(status.motion_tuning_synced, true);
   assert.equal(status.motion_tuning_sync_state, 'synced');
+});
+
+test('normalizeStatus exposes depth hold telemetry without inventing values', () => {
+  const status = normalizeStatus({
+    depth_m: 2.35,
+    float_enabled: true,
+    depth_sensor_ready: true,
+    depth_sample_valid: true,
+    depth_sample_age_ms: 32,
+    depth_requested_target_m: 2.5,
+    depth_active_setpoint_m: 2.48,
+    depth_error_m: 0.13,
+    depth_pid_p_us: 26,
+    depth_pid_i_us: 4,
+    depth_pid_d_us: -2,
+    depth_pid_output_us: 28,
+    depth_pid_saturated: false,
+    depth_actuator_ready: true,
+    depth_pid_tuning_synced: true,
+    depth_pid_tuning_sync_state: 'synced',
+    depth_pid_tuning_sync_error: null,
+    last_depth_control_report_at: 1234.5,
+  });
+  assert.equal(status.float_enabled, true);
+  assert.equal(status.depth_sensor_ready, true);
+  assert.equal(status.depth_sample_valid, true);
+  assert.equal(status.depth_sample_age_ms, 32);
+  assert.equal(status.depth_requested_target_m, 2.5);
+  assert.equal(status.depth_active_setpoint_m, 2.48);
+  assert.equal(status.depth_error_m, 0.13);
+  assert.equal(status.depth_pid_p_us, 26);
+  assert.equal(status.depth_pid_i_us, 4);
+  assert.equal(status.depth_pid_d_us, -2);
+  assert.equal(status.depth_pid_output_us, 28);
+  assert.equal(status.depth_pid_saturated, false);
+  assert.equal(status.depth_actuator_ready, true);
+  assert.equal(status.depth_pid_tuning_synced, true);
+  assert.equal(status.depth_pid_tuning_sync_state, 'synced');
+  assert.equal(status.depth_pid_tuning_sync_error, null);
+  assert.equal(status.last_depth_control_report_at, 1234.5);
 });
 
 test('normalizeStatus keeps requested and confirmed PWM distinct', () => {

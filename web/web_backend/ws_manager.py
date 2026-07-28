@@ -196,6 +196,15 @@ class WebSocketManager:
 
     def _status_message(self) -> dict:
         state = self._proxy.refresh_link_state()
+        self._control_state.reconcile_depth_hold(
+            state.safety_state,
+            bool(state.flags & 0x02),
+            link_ready=bool(
+                self._transport.connected
+                and state.stm32_online
+                and not state.status_stale
+            ),
+        )
         status_data = state.to_dict()
         sensors_data = state.sensors_to_dict()
         sensors_last_update = sensors_data.pop("last_update", 0.0)

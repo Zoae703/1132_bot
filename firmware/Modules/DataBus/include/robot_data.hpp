@@ -15,6 +15,11 @@ inline constexpr uint16_t ROBOT_PWM_SLEW_RATE_MIN_US_PER_S = 100U;
 inline constexpr uint16_t ROBOT_PWM_SLEW_RATE_MAX_US_PER_S = 5000U;
 inline constexpr uint16_t ROBOT_BODY_COMMAND_TIMEOUT_MIN_MS = 200U;
 inline constexpr uint16_t ROBOT_BODY_COMMAND_TIMEOUT_MAX_MS = 2000U;
+inline constexpr uint32_t ROBOT_DEPTH_SAMPLE_MAX_AGE_MS = 500U;
+inline constexpr float ROBOT_DEPTH_VALID_MIN_M = -10.0F;
+inline constexpr float ROBOT_DEPTH_VALID_MAX_M = 300.0F;
+inline constexpr float ROBOT_DEPTH_TARGET_MIN_CM = 0.0F;
+inline constexpr float ROBOT_DEPTH_TARGET_MAX_CM = 30000.0F;
 
 enum class RobotState : uint8_t {
     DISARMED = 0,
@@ -47,6 +52,16 @@ struct MotionTuning {
     uint16_t command_timeout_ms = ROBOT_BODY_COMMAND_TIMEOUT_MS;
 };
 
+struct DepthPidTuning {
+    float kp = 10.0F;
+    float ki = 0.02F;
+    float kd = 10.0F;
+    float p_limit_us = 100.0F;
+    float i_limit_us = 50.0F;
+    float d_limit_us = 50.0F;
+    float output_limit_us = 200.0F;
+};
+
 enum class BodyCommandSource : uint8_t {
     None = 0,
     LegacySetMotion = 1,
@@ -73,6 +88,10 @@ struct RobotData {
     float depth_m = 0;
     float pressure_mbar = 0;
     float water_temp_c = 0;
+    bool depth_sensor_ready = false;
+    bool depth_sample_valid = false;
+    uint32_t depth_sample_ms = 0;
+    uint32_t depth_sample_generation = 0;
 
     // === Targets (written by Communication module) ===
     float target_depth_cm = 30;     // depth target in cm
@@ -108,10 +127,27 @@ struct RobotData {
     bool body_control_enabled = false;
     MotionTuning motion_tuning{};
     uint32_t motion_tuning_generation = 0;
+    DepthPidTuning depth_pid_tuning{};
+    uint32_t depth_pid_tuning_generation = 0;
+    uint32_t depth_control_generation = 0;
+    uint32_t depth_hold_session_generation = 0;
+    uint32_t depth_command_last_ms = 0;
+    float depth_active_setpoint_cm = 0.0F;
+    float depth_control_measured_cm = 0.0F;
+    float depth_error_cm = 0.0F;
+    float depth_pid_p_us = 0.0F;
+    float depth_pid_i_us = 0.0F;
+    float depth_pid_d_us = 0.0F;
+    float depth_pid_output_us = 0.0F;
+    bool depth_pid_saturated = false;
+    uint8_t depth_control_fault_reason = 0;
     float mixed_output[8] = {0.0F};
     bool horizontal_saturated = false;
     bool vertical_saturated = false;
     uint32_t pwm_output_generation = 0;
+    // Set only after PCA9685 timing and all channel registers are verified.
+    // ARM and ESTOP reset remain blocked while actuator output is unavailable.
+    bool actuator_output_ready = false;
 
     // === Safety state machine ===
     RobotState state = RobotState::DISARMED;
@@ -144,6 +180,9 @@ struct RobotData {
 bool body_command_is_valid(const BodyCommand &command);
 bool body_command_is_zero(const BodyCommand &command);
 bool motion_tuning_is_valid(const MotionTuning &tuning);
+bool depth_pid_tuning_is_valid(const DepthPidTuning &tuning);
+bool depth_sample_is_fresh(const RobotData &data, uint32_t now);
+void reset_depth_control_runtime(RobotData &data);
 void invalidate_body_command(RobotData &data);
 void mark_pwm_output_updated(RobotData &data);
 void force_body_output_neutral(RobotData &data);

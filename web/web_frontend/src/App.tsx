@@ -18,6 +18,7 @@ import {
   sensorsFreshnessMessage,
   shouldClearLocalRequest,
 } from './uiState';
+import DepthControlPanel from './DepthControlPanel';
 import './App.css';
 
 type NoticeKind = 'error' | 'warning' | 'info';
@@ -1888,10 +1889,12 @@ export default function App() {
   const [estopPending, setEstopPending] = useState(false);
   const [estopGateVersion, setEstopGateVersion] = useState<number | null>(null);
   const [activePage, setActivePage] = useState<
-    'dashboard' | 'motion' | 'gamepad'
+    'dashboard' | 'motion' | 'depth' | 'gamepad'
   >(() => (
     window.location.hash === '#motion'
       ? 'motion'
+      : window.location.hash === '#depth'
+        ? 'depth'
       : window.location.hash === '#gamepad'
         ? 'gamepad'
         : 'dashboard'
@@ -1910,6 +1913,8 @@ export default function App() {
       setActivePage(
         window.location.hash === '#motion'
           ? 'motion'
+          : window.location.hash === '#depth'
+            ? 'depth'
           : window.location.hash === '#gamepad'
             ? 'gamepad'
             : 'dashboard',
@@ -1919,7 +1924,9 @@ export default function App() {
     return () => window.removeEventListener('hashchange', syncPageFromHash);
   }, []);
 
-  const selectPage = (page: 'dashboard' | 'motion' | 'gamepad') => {
+  const selectPage = (
+    page: 'dashboard' | 'motion' | 'depth' | 'gamepad',
+  ) => {
     window.location.hash = page;
     setActivePage(page);
   };
@@ -2057,6 +2064,12 @@ export default function App() {
             运动调参
           </button>
           <button
+            className={activePage === 'depth' ? 'is-active' : ''}
+            onClick={() => selectPage('depth')}
+          >
+            定深调试
+          </button>
+          <button
             className={activePage === 'gamepad' ? 'is-active' : ''}
             onClick={() => selectPage('gamepad')}
           >
@@ -2120,6 +2133,28 @@ export default function App() {
               onEvent={addEvent}
             />
             <PwmOutputGrid status={status} connected={connected} capabilities={capabilities} />
+            <EventLog events={events} />
+          </div>
+        ) : activePage === 'depth' ? (
+          <div className="dashboard-grid">
+            <DepthControlPanel
+              status={status}
+              connected={connected}
+              capabilities={capabilities}
+              capabilitiesReady={capabilitiesReady}
+              safetyLocked={pwmSafetyLocked}
+              telemetryVersion={telemetryVersion}
+              connectionVersion={connectionVersion}
+              apiGet={apiGet}
+              apiPost={apiPost}
+              onError={setError}
+              onEvent={addEvent}
+            />
+            <PwmOutputGrid
+              status={status}
+              connected={connected}
+              capabilities={capabilities}
+            />
             <EventLog events={events} />
           </div>
         ) : (

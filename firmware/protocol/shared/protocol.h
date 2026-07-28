@@ -68,16 +68,21 @@ typedef enum {
     ProtoMsg_BODY_CONTROL_ON  = 0x38,
     ProtoMsg_BODY_CONTROL_OFF = 0x39,
     ProtoMsg_SET_MOTION_TUNING = 0x3A,
+    ProtoMsg_SET_DEPTH_PID_TUNING = 0x3B,
 
     /* 0x40 – 0x4F : Query / Request */
     ProtoMsg_REQUEST_STATUS   = 0x40,
     ProtoMsg_REQUEST_SENSORS  = 0x41,
     ProtoMsg_REQUEST_MOTION_TUNING = 0x42,
+    ProtoMsg_REQUEST_DEPTH_PID_TUNING = 0x43,
+    ProtoMsg_REQUEST_DEPTH_CONTROL = 0x44,
 
     /* 0x80 – 0x8F : Telemetry reports (STM32 → OPi) */
     ProtoMsg_STATUS_REPORT    = 0x80,
     ProtoMsg_SENSOR_REPORT    = 0x81,
     ProtoMsg_MOTION_TUNING_REPORT = 0x82,
+    ProtoMsg_DEPTH_PID_TUNING_REPORT = 0x83,
+    ProtoMsg_DEPTH_CONTROL_REPORT = 0x84,
 
     /* 0x90 – 0x9F : Async events (STM32 → OPi) */
     ProtoMsg_LOG_MESSAGE      = 0x90,
@@ -135,6 +140,7 @@ typedef enum {
     ProtoNeutral_EMERGENCY_STOP           = 5,
     ProtoNeutral_LAST_CLIENT_DISCONNECTED = 6,
     ProtoNeutral_FAULT                    = 7,
+    ProtoNeutral_DEPTH_SENSOR             = 8,
 } ProtoNeutralReason;
 
 /* ------------------------------------------------------------------ */
@@ -200,6 +206,20 @@ typedef struct {
     uint16_t command_timeout_ms;
 } ProtoMotionTuning;
 
+/**
+ * SET_DEPTH_PID_TUNING / DEPTH_PID_TUNING_REPORT payload: 28 bytes.
+ * Errors are expressed in centimetres and all limits/outputs in PWM us.
+ */
+typedef struct {
+    float kp;
+    float ki;
+    float kd;
+    float p_limit_us;
+    float i_limit_us;
+    float d_limit_us;
+    float output_limit_us;
+} ProtoDepthPidTuning;
+
 /** STATUS_REPORT payload: 24 bytes */
 typedef struct {
     uint8_t  safety_state;    /* ProtoSafetyState */
@@ -226,6 +246,28 @@ typedef struct {
     float pitch_v;            /* rad/s */
     float roll_v;             /* rad/s */
 } ProtoSensorReport;
+
+/**
+ * DEPTH_CONTROL_REPORT payload: 40 bytes.
+ * flags:
+ * bit0=enabled, bit1=sensor ready, bit2=sample fresh/valid,
+ * bit3=PID output saturated, bit4=vertical mixer saturated,
+ * bit5=actuator output ready.
+ */
+typedef struct {
+    float requested_target_cm;
+    float active_setpoint_cm;
+    float measured_depth_cm;
+    float error_cm;
+    float p_term_us;
+    float i_term_us;
+    float d_term_us;
+    float output_us;
+    uint32_t sample_age_ms;
+    uint8_t flags;
+    uint8_t fault_reason;
+    uint16_t reserved;
+} ProtoDepthControlReport;
 
 /** ACK payload: 2 bytes (echoes the sequence number of the acknowledged command) */
 typedef struct {
@@ -272,8 +314,12 @@ static_assert(sizeof(ProtoSetBodyCommand) == 24U,
               "ProtoSetBodyCommand wire size");
 static_assert(sizeof(ProtoMotionTuning) == 56U,
               "ProtoMotionTuning wire size");
+static_assert(sizeof(ProtoDepthPidTuning) == 28U,
+              "ProtoDepthPidTuning wire size");
 static_assert(sizeof(ProtoStatusReport) == 24U, "ProtoStatusReport wire size");
 static_assert(sizeof(ProtoSensorReport) == 72U, "ProtoSensorReport wire size");
+static_assert(sizeof(ProtoDepthControlReport) == 40U,
+              "ProtoDepthControlReport wire size");
 static_assert(sizeof(ProtoAck) == 2U, "ProtoAck wire size");
 static_assert(sizeof(ProtoNack) == 4U, "ProtoNack wire size");
 static_assert(sizeof(ProtoSafetyEvent) == 4U, "ProtoSafetyEvent wire size");
@@ -288,8 +334,12 @@ _Static_assert(sizeof(ProtoSetBodyCommand) == 24U,
                "ProtoSetBodyCommand wire size");
 _Static_assert(sizeof(ProtoMotionTuning) == 56U,
                "ProtoMotionTuning wire size");
+_Static_assert(sizeof(ProtoDepthPidTuning) == 28U,
+               "ProtoDepthPidTuning wire size");
 _Static_assert(sizeof(ProtoStatusReport) == 24U, "ProtoStatusReport wire size");
 _Static_assert(sizeof(ProtoSensorReport) == 72U, "ProtoSensorReport wire size");
+_Static_assert(sizeof(ProtoDepthControlReport) == 40U,
+               "ProtoDepthControlReport wire size");
 _Static_assert(sizeof(ProtoAck) == 2U, "ProtoAck wire size");
 _Static_assert(sizeof(ProtoNack) == 4U, "ProtoNack wire size");
 _Static_assert(sizeof(ProtoSafetyEvent) == 4U, "ProtoSafetyEvent wire size");

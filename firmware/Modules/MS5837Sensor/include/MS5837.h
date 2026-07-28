@@ -9,8 +9,8 @@
  *   - Replaces Arduino.h / <Wire.h> with <stdint.h> + "stm32f4xx_hal.h".
  *   - I2C peripheral handle is supplied at runtime via init(I2C_HandleTypeDef*).
  *   - All HAL_I2C_* calls use a 100 ms timeout. init() returns false on any
- *     HAL transmission error or CRC failure. read() silently keeps the last
- *     valid sample on transmission failure.
+ *     HAL transmission error or CRC failure. read() returns false and keeps
+ *     the last valid sample on transmission failure.
  *   - calculate() and crc4() are pure integer math, kept verbatim from the
  *     original library.
  *
@@ -56,9 +56,10 @@ public:
 
 	/** Trigger a blocking pressure + temperature acquisition.
 	 *  The call takes up to ~40 ms (two 8192 OSR conversions of ~20 ms each).
-	 *  On I2C error, the last valid sample is retained.
+	 *  Returns true only when both conversions and reads succeed. On error,
+	 *  the last valid sample is retained.
 	 */
-	void read();
+	bool read();
 
 	/** Pressure returned in mbar or mbar*conversion rate.
 	 */

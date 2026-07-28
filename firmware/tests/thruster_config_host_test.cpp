@@ -631,6 +631,221 @@ void test_pwm_slew_and_hard_stop()
     expect_all_body_output_neutral();
 }
 
+void set_depth_hold_fixture(float measured_depth_m,
+                            float target_depth_cm)
+{
+    robot = RobotData{};
+    robot.state = RobotState::ARMED_ACTIVE;
+    robot.control_enable = true;
+    robot.float_enabled = true;
+    robot.body_control_enabled = false;
+    robot.angle_enabled = false;
+    robot.actuator_output_ready = true;
+    robot.depth_sensor_ready = true;
+    robot.depth_sample_valid = true;
+    robot.depth_sample_ms = fake_tick;
+    robot.depth_sample_generation = 1U;
+    robot.depth_control_generation = 1U;
+    robot.depth_hold_session_generation = 1U;
+    robot.depth_command_last_ms = fake_tick;
+    robot.depth_m = measured_depth_m;
+    robot.target_depth_cm = target_depth_cm;
+    for (float &limit : robot.motion_tuning.axis_max_output)
+    {
+        limit = 1.0F;
+    }
+    robot.motion_tuning.pwm_slew_rate_us_per_s =
+        ROBOT_PWM_SLEW_RATE_MAX_US_PER_S;
+}
+
+Wrench run_depth_hold(float measured_depth_m, float target_depth_cm)
+{
+    MotorControl controller;
+    fake_tick = 1000U;
+    controller.Init();
+    set_depth_hold_fixture(measured_depth_m, target_depth_cm);
+    fake_tick += 100U;
+    controller.Update();
+    assert(robot.float_enabled);
+    assert(robot.state == RobotState::ARMED_ACTIVE);
+    assert(std::isfinite(robot.depth_pid_output_us));
+    return wrench_from_mixed_output();
+}
+
+void test_depth_pid_direction_and_sample_rate()
+{
+    const Wrench deeper = run_depth_hold(1.0F, 110.0F);
+    assert(deeper.force.z > 0.0F);
+    assert(robot.mixed_output[1] > 0.0F);
+    assert(robot.mixed_output[2] > 0.0F);
+    assert(robot.mixed_output[5] < 0.0F);
+    assert(robot.mixed_output[6] < 0.0F);
+    assert(robot.depth_error_cm > 0.0F);
+    assert(robot.depth_pid_output_us > 0.0F);
+
+    const Wrench shallower = run_depth_hold(1.0F, 90.0F);
+    assert(shallower.force.z < 0.0F);
+    assert(robot.mixed_output[1] < 0.0F);
+    assert(robot.mixed_output[2] < 0.0F);
+    assert(robot.mixed_output[5] > 0.0F);
+    assert(robot.mixed_output[6] > 0.0F);
+    assert(robot.depth_error_cm < 0.0F);
+    assert(robot.depth_pid_output_us < 0.0F);
+
+    MotorControl controller;
+    fake_tick = 1000U;
+    controller.Init();
+    set_depth_hold_fixture(1.0F, 105.0F);
+    fake_tick += 100U;
+    controller.Update();
+    const float integral_after_first_sample = robot.depth_pid_i_us;
+    const float output_after_first_sample = robot.depth_pid_output_us;
+    fake_tick += 20U;
+    controller.Update();
+    assert(robot.depth_pid_i_us == integral_after_first_sample);
+    assert(robot.depth_pid_output_us == output_after_first_sample);
+
+    robot.depth_sample_generation++;
+    robot.depth_sample_ms = fake_tick;
+    fake_tick += 20U;
+    controller.Update();
+    assert(robot.depth_pid_i_us > integral_after_first_sample);
+
+    robot.target_depth_cm = 100.0F;
+    robot.depth_control_generation++;
+    fake_tick += 20U;
+    controller.Update();
+    assert(robot.depth_error_cm == 0.0F);
+    assert(robot.depth_pid_i_us == 0.0F);
+    assert(robot.depth_pid_output_us == 0.0F);
+}
+
+void test_depth_sensor_stale_fails_closed()
+{
+    MotorControl controller;
+    fake_tick = 1000U;
+    controller.Init();
+    set_depth_hold_fixture(1.0F, 110.0F);
+    robot.depth_sample_ms =
+        fake_tick - ROBOT_DEPTH_SAMPLE_MAX_AGE_MS - 1U;
+    controller.Update();
+
+    assert(robot.state == RobotState::ARMED_IDLE);
+    assert(!robot.control_enable);
+    assert(!robot.float_enabled);
+    assert(robot.last_neutral_reason == 8U);
+    assert(robot.depth_control_fault_reason == 8U);
+    expect_all_body_output_neutral();
+}
+
+void test_depth_command_lease_boundary_and_refresh()
+{
+    MotorControl controller;
+    fake_tick = 1000U;
+    controller.Init();
+    set_depth_hold_fixture(1.0F, 110.0F);
+
+    fake_tick = 1500U;
+    controller.Update();
+    assert(robot.state == RobotState::ARMED_ACTIVE);
+    assert(robot.float_enabled);
+
+    // A same-target SET_DEPTH keepalive refreshes only the dedicated lease.
+    fake_tick = 1501U;
+    robot.depth_command_last_ms = fake_tick;
+    robot.depth_sample_ms = fake_tick;
+    fake_tick = 2001U;
+    controller.Update();
+    assert(robot.state == RobotState::ARMED_ACTIVE);
+    assert(robot.float_enabled);
+
+    // The sensor can remain fresh while the command lease expires.
+    fake_tick = 2002U;
+    robot.depth_sample_ms = fake_tick;
+    robot.depth_sample_generation++;
+    controller.Update();
+    assert(robot.state == RobotState::ARMED_IDLE);
+    assert(!robot.control_enable);
+    assert(!robot.float_enabled);
+    assert(robot.depth_command_last_ms == 0U);
+    assert(robot.last_neutral_reason == 1U);
+    assert(robot.depth_control_fault_reason == 1U);
+    expect_all_body_output_neutral();
+}
+
+void test_depth_session_resets_attitude_pid_state()
+{
+    MotorControl controller;
+    fake_tick = 1000U;
+    controller.Init();
+    set_depth_hold_fixture(1.0F, 100.0F);
+
+    robot.roll = 0.4F;
+    robot.pitch = -0.3F;
+    for (uint8_t iteration = 0U; iteration < 6U; ++iteration)
+    {
+        fake_tick += 20U;
+        robot.depth_command_last_ms = fake_tick;
+        robot.depth_sample_ms = fake_tick;
+        robot.depth_sample_generation++;
+        controller.Update();
+    }
+    bool had_attitude_output = false;
+    for (float output : robot.mixed_output)
+    {
+        had_attitude_output =
+            had_attitude_output || std::fabs(output) > 1.0e-6F;
+    }
+    assert(had_attitude_output);
+
+    robot.control_enable = false;
+    robot.float_enabled = false;
+    robot.state = RobotState::ARMED_IDLE;
+    controller.Update();
+    expect_all_body_output_neutral();
+
+    robot.state = RobotState::ARMED_ACTIVE;
+    robot.control_enable = true;
+    robot.float_enabled = true;
+    robot.roll = 0.0F;
+    robot.pitch = 0.0F;
+    robot.roll_v = 0.0F;
+    robot.pitch_v = 0.0F;
+    robot.depth_m = 1.0F;
+    robot.target_depth_cm = 100.0F;
+    robot.depth_sample_valid = true;
+    robot.depth_sample_ms = fake_tick;
+    robot.depth_sample_generation++;
+    robot.depth_hold_session_generation++;
+    robot.depth_command_last_ms = fake_tick;
+    controller.Update();
+
+    assert(robot.state == RobotState::ARMED_ACTIVE);
+    assert(robot.float_enabled);
+    assert(std::fabs(robot.depth_pid_output_us) < 1.0e-6F);
+    for (float output : robot.mixed_output)
+    {
+        assert(std::fabs(output) < 1.0e-6F);
+    }
+}
+
+void test_pid_zero_integral_gain_and_reset()
+{
+    PID pid;
+    pid.PIDInfo = PID_Regulator_t(
+        2.0F, 0.0F, 1.0F, 100.0F, 50.0F, 50.0F, 200.0F);
+    const float first = pid.PIDCalc(10.0F, 5.0F);
+    assert(std::isfinite(first));
+    assert(pid.PIDInfo.componentKi == 0.0F);
+    assert(pid.PIDInfo.errSum == 0.0F);
+    pid.Reset();
+    assert(pid.PIDInfo.errSum == 0.0F);
+    assert(pid.PIDInfo.err[2] == 0.0F);
+    assert(pid.PIDInfo.output == 0.0F);
+    assert(pid.PIDInfo.kp == 2.0F);
+    assert(pid.PIDInfo.ki == 0.0F);
+}
+
 } // namespace
 
 extern "C" uint32_t HAL_GetTick(void)
@@ -652,6 +867,11 @@ int main()
     test_unsafe_states_force_neutral();
     test_manual_test_remains_single_channel();
     test_pwm_slew_and_hard_stop();
+    test_depth_pid_direction_and_sample_rate();
+    test_depth_sensor_stale_fails_closed();
+    test_depth_command_lease_boundary_and_refresh();
+    test_depth_session_resets_attitude_pid_state();
+    test_pid_zero_integral_gain_and_reset();
     std::cout << "thruster config host tests: PASS\n";
     return 0;
 }

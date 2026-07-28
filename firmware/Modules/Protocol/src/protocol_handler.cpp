@@ -21,8 +21,6 @@ bool bp_initialized = false;
 constexpr uint8_t kChannelCount = 8U;
 constexpr uint32_t kMinPwmTimeoutMs = 200U;
 constexpr uint32_t kMaxPwmTimeoutMs = 2000U;
-constexpr float kMinDepthCm = 0.0F;
-constexpr float kMaxDepthCm = 30000.0F;
 constexpr float kMaxAbsYawDeg = 360.0F;
 constexpr float kLegacySurge = 80.0F / 450.0F;
 constexpr float kLegacySway = 80.0F / 450.0F;
@@ -98,7 +96,10 @@ void neutral_locked(uint8_t reason)
     robot.manual_pwm_enabled = false;
     robot.active_test_channel = 0xFFU;
     robot.body_control_enabled = false;
+    robot.depth_command_last_ms = 0U;
     robot.last_neutral_reason = reason;
+    reset_depth_control_runtime(robot);
+    robot.depth_control_fault_reason = reason;
 }
 
 void reject_body_command(uint16_t sequence, uint8_t type, uint8_t reason)
@@ -141,6 +142,10 @@ void handle_arm(uint16_t sequence)
     {
         failure = ProtoNack_EstopLocked;
     }
+    else if (!robot.actuator_output_ready)
+    {
+        failure = ProtoNack_InternalError;
+    }
     else if (robot.state == RobotState::DISARMED ||
              robot.state == RobotState::COMM_LOST)
     {
@@ -181,6 +186,12 @@ void handle_disarm(uint16_t sequence)
         resulting_state = RobotState::EMERGENCY_STOP;
         changed = set_state_locked(resulting_state, now);
     }
+    else if (!robot.actuator_output_ready &&
+             robot.state == RobotState::FAULT)
+    {
+        neutral_locked(ProtoNeutral_FAULT);
+        resulting_state = RobotState::FAULT;
+    }
     else
     {
         neutral_locked(ProtoNeutral_DISARM);
@@ -216,19 +227,27 @@ void handle_reset_estop(uint16_t sequence)
     const uint32_t now = HAL_GetTick();
     bool changed = false;
     bool valid = false;
+    uint8_t failure = ProtoNack_BadState;
     taskENTER_CRITICAL();
     if (robot.estop_locked && robot.state == RobotState::EMERGENCY_STOP)
     {
-        robot.estop_locked = false;
-        neutral_locked(ProtoNeutral_DISARM);
-        changed = set_state_locked(RobotState::DISARMED, now);
-        valid = true;
+        if (robot.actuator_output_ready)
+        {
+            robot.estop_locked = false;
+            neutral_locked(ProtoNeutral_DISARM);
+            changed = set_state_locked(RobotState::DISARMED, now);
+            valid = true;
+        }
+        else
+        {
+            failure = ProtoNack_InternalError;
+        }
     }
     taskEXIT_CRITICAL();
 
     if (!valid)
     {
-        reject(sequence, ProtoMsg_RESET_ESTOP, ProtoNack_BadState);
+        reject(sequence, ProtoMsg_RESET_ESTOP, failure);
         return;
     }
     log_state_change(changed, RobotState::DISARMED);
@@ -378,14 +397,47 @@ void handle_float_on(uint16_t sequence)
     const uint32_t now = HAL_GetTick();
     bool changed = false;
     bool valid = false;
+    uint8_t failure = ProtoNack_BadState;
     taskENTER_CRITICAL();
-    if (!robot.estop_locked &&
-        (robot.state == RobotState::ARMED_IDLE ||
-         robot.state == RobotState::ARMED_ACTIVE))
+    const float current_cm = robot.depth_m * 100.0F;
+    if (robot.estop_locked)
     {
-        const float current_cm = robot.depth_m * 100.0F;
-        robot.target_depth_cm = current_cm > 30.0F ? current_cm : 30.0F;
+        failure = ProtoNack_EstopLocked;
+    }
+    else if (robot.state != RobotState::ARMED_IDLE)
+    {
+        failure = ProtoNack_BadState;
+    }
+    else if (!robot.actuator_output_ready ||
+             !depth_pid_tuning_is_valid(robot.depth_pid_tuning) ||
+             !depth_sample_is_fresh(robot, now) ||
+             !std::isfinite(current_cm) ||
+             current_cm < ROBOT_DEPTH_TARGET_MIN_CM ||
+             current_cm > ROBOT_DEPTH_TARGET_MAX_CM)
+    {
+        force_body_output_neutral(robot);
+        robot.last_neutral_reason =
+            (!robot.actuator_output_ready ||
+             !depth_pid_tuning_is_valid(robot.depth_pid_tuning))
+                ? ProtoNeutral_FAULT
+                : ProtoNeutral_DEPTH_SENSOR;
+        robot.depth_control_fault_reason = robot.last_neutral_reason;
+        failure = ProtoNack_InternalError;
+    }
+    else
+    {
+        /*
+         * Capture the measured depth without clamping.  A negative value can
+         * occur when the fixed atmospheric reference is not calibrated; using
+         * a clamped 0 cm target would create an immediate unintended down-thrust.
+         */
+        robot.target_depth_cm = current_cm;
+        reset_depth_control_runtime(robot);
+        robot.depth_active_setpoint_cm = robot.target_depth_cm;
+        robot.depth_control_measured_cm = current_cm;
         robot.float_enabled = true;
+        robot.depth_hold_session_generation++;
+        robot.depth_command_last_ms = now;
         robot.control_enable = true;
         robot.manual_pwm_enabled = false;
         robot.active_test_channel = 0xFFU;
@@ -398,7 +450,7 @@ void handle_float_on(uint16_t sequence)
     taskEXIT_CRITICAL();
     if (!valid)
     {
-        reject(sequence, ProtoMsg_FLOAT_ON, ProtoNack_BadState);
+        reject(sequence, ProtoMsg_FLOAT_ON, failure);
         return;
     }
     log_state_change(changed, RobotState::ARMED_ACTIVE);
@@ -412,9 +464,12 @@ void handle_float_off(uint16_t sequence)
     bool valid = false;
     RobotState resulting_state = RobotState::ARMED_IDLE;
     taskENTER_CRITICAL();
-    if (robot.state == RobotState::ARMED_ACTIVE)
+    if (robot.state == RobotState::ARMED_ACTIVE &&
+        robot.float_enabled)
     {
         robot.float_enabled = false;
+        robot.depth_command_last_ms = 0U;
+        reset_depth_control_runtime(robot);
         force_body_output_neutral(robot);
         if (!robot.angle_enabled && !robot.body_control_enabled)
         {
@@ -502,8 +557,8 @@ void handle_set_depth(const uint8_t *payload, uint16_t sequence)
 {
     const ProtoSetDepth command = decode_payload<ProtoSetDepth>(payload);
     if (!std::isfinite(command.target_depth_cm) ||
-        command.target_depth_cm < kMinDepthCm ||
-        command.target_depth_cm > kMaxDepthCm)
+        command.target_depth_cm < ROBOT_DEPTH_TARGET_MIN_CM ||
+        command.target_depth_cm > ROBOT_DEPTH_TARGET_MAX_CM)
     {
         reject(sequence, ProtoMsg_SET_DEPTH, ProtoNack_InvalidValue);
         return;
@@ -511,11 +566,21 @@ void handle_set_depth(const uint8_t *payload, uint16_t sequence)
     bool valid = false;
     taskENTER_CRITICAL();
     if (robot.state == RobotState::ARMED_ACTIVE &&
-        (robot.body_control_enabled || robot.float_enabled) &&
-        !robot.estop_locked)
+        robot.float_enabled &&
+        robot.control_enable &&
+        !robot.estop_locked &&
+        depth_sample_is_fresh(robot, HAL_GetTick()))
     {
-        robot.target_depth_cm = command.target_depth_cm;
-        robot.last_cmd_tick = HAL_GetTick();
+        if (robot.target_depth_cm != command.target_depth_cm)
+        {
+            robot.target_depth_cm = command.target_depth_cm;
+            reset_depth_control_runtime(robot);
+            robot.depth_active_setpoint_cm =
+                command.target_depth_cm;
+        }
+        const uint32_t now = HAL_GetTick();
+        robot.depth_command_last_ms = now;
+        robot.last_cmd_tick = now;
         valid = true;
     }
     taskEXIT_CRITICAL();
@@ -769,6 +834,50 @@ void handle_set_motion_tuning(const uint8_t *payload, uint16_t sequence)
     queue_ack(sequence);
 }
 
+void handle_set_depth_pid_tuning(const uint8_t *payload,
+                                 uint16_t sequence)
+{
+    const ProtoDepthPidTuning wire =
+        decode_payload<ProtoDepthPidTuning>(payload);
+    const DepthPidTuning tuning{
+        wire.kp,
+        wire.ki,
+        wire.kd,
+        wire.p_limit_us,
+        wire.i_limit_us,
+        wire.d_limit_us,
+        wire.output_limit_us,
+    };
+    if (!depth_pid_tuning_is_valid(tuning))
+    {
+        reject(sequence, ProtoMsg_SET_DEPTH_PID_TUNING,
+               ProtoNack_InvalidValue);
+        return;
+    }
+
+    bool accepted = false;
+    taskENTER_CRITICAL();
+    if (!robot.estop_locked &&
+        (robot.state == RobotState::DISARMED ||
+         robot.state == RobotState::ARMED_IDLE) &&
+        !robot.float_enabled)
+    {
+        robot.depth_pid_tuning = tuning;
+        robot.depth_pid_tuning_generation++;
+        reset_depth_control_runtime(robot);
+        accepted = true;
+    }
+    taskEXIT_CRITICAL();
+    if (!accepted)
+    {
+        reject(sequence, ProtoMsg_SET_DEPTH_PID_TUNING,
+               robot.estop_locked ? ProtoNack_EstopLocked
+                                  : ProtoNack_BadState);
+        return;
+    }
+    queue_ack(sequence);
+}
+
 void handle_heartbeat(const uint8_t *payload, uint16_t sequence)
 {
     const ProtoHeartbeat heartbeat = decode_payload<ProtoHeartbeat>(payload);
@@ -904,6 +1013,59 @@ extern "C" bool bp_queue_motion_tuning_report(BinaryProtocol *bp,
         reinterpret_cast<const uint8_t *>(&report), sizeof(report), priority);
 }
 
+extern "C" bool bp_queue_depth_pid_tuning_report(
+    BinaryProtocol *bp, BpTxPriority priority)
+{
+    if (bp == nullptr) return false;
+    ProtoDepthPidTuning report{};
+    taskENTER_CRITICAL();
+    report.kp = robot.depth_pid_tuning.kp;
+    report.ki = robot.depth_pid_tuning.ki;
+    report.kd = robot.depth_pid_tuning.kd;
+    report.p_limit_us = robot.depth_pid_tuning.p_limit_us;
+    report.i_limit_us = robot.depth_pid_tuning.i_limit_us;
+    report.d_limit_us = robot.depth_pid_tuning.d_limit_us;
+    report.output_limit_us = robot.depth_pid_tuning.output_limit_us;
+    taskEXIT_CRITICAL();
+    return bp_send_frame_priority(
+        bp, ProtoMsg_DEPTH_PID_TUNING_REPORT,
+        reinterpret_cast<const uint8_t *>(&report), sizeof(report),
+        priority);
+}
+
+extern "C" bool bp_queue_depth_control_report(
+    BinaryProtocol *bp, BpTxPriority priority)
+{
+    if (bp == nullptr) return false;
+    ProtoDepthControlReport report{};
+    taskENTER_CRITICAL();
+    const uint32_t now = HAL_GetTick();
+    report.requested_target_cm = robot.target_depth_cm;
+    report.active_setpoint_cm = robot.depth_active_setpoint_cm;
+    report.measured_depth_cm = robot.depth_control_measured_cm;
+    report.error_cm = robot.depth_error_cm;
+    report.p_term_us = robot.depth_pid_p_us;
+    report.i_term_us = robot.depth_pid_i_us;
+    report.d_term_us = robot.depth_pid_d_us;
+    report.output_us = robot.depth_pid_output_us;
+    report.sample_age_ms =
+        robot.depth_sample_generation == 0U
+            ? UINT32_MAX
+            : now - robot.depth_sample_ms;
+    if (robot.float_enabled) report.flags |= 0x01U;
+    if (robot.depth_sensor_ready) report.flags |= 0x02U;
+    if (depth_sample_is_fresh(robot, now)) report.flags |= 0x04U;
+    if (robot.depth_pid_saturated) report.flags |= 0x08U;
+    if (robot.vertical_saturated) report.flags |= 0x10U;
+    if (robot.actuator_output_ready) report.flags |= 0x20U;
+    report.fault_reason = robot.depth_control_fault_reason;
+    taskEXIT_CRITICAL();
+    return bp_send_frame_priority(
+        bp, ProtoMsg_DEPTH_CONTROL_REPORT,
+        reinterpret_cast<const uint8_t *>(&report), sizeof(report),
+        priority);
+}
+
 extern "C" void bp_dispatch_frame(BinaryProtocol *bp, uint8_t type,
                                   uint16_t sequence, const uint8_t *payload,
                                   uint16_t payload_len)
@@ -996,6 +1158,9 @@ extern "C" void bp_dispatch_frame(BinaryProtocol *bp, uint8_t type,
     case ProtoMsg_SET_MOTION_TUNING:
         handle_set_motion_tuning(payload, sequence);
         break;
+    case ProtoMsg_SET_DEPTH_PID_TUNING:
+        handle_set_depth_pid_tuning(payload, sequence);
+        break;
     case ProtoMsg_REQUEST_STATUS:
         if (!bp_queue_status_report(&bp_instance, BP_TX_PRIORITY_HIGH))
             increment_protocol_error();
@@ -1006,6 +1171,16 @@ extern "C" void bp_dispatch_frame(BinaryProtocol *bp, uint8_t type,
         break;
     case ProtoMsg_REQUEST_MOTION_TUNING:
         if (!bp_queue_motion_tuning_report(
+                &bp_instance, BP_TX_PRIORITY_HIGH))
+            increment_protocol_error();
+        break;
+    case ProtoMsg_REQUEST_DEPTH_PID_TUNING:
+        if (!bp_queue_depth_pid_tuning_report(
+                &bp_instance, BP_TX_PRIORITY_HIGH))
+            increment_protocol_error();
+        break;
+    case ProtoMsg_REQUEST_DEPTH_CONTROL:
+        if (!bp_queue_depth_control_report(
                 &bp_instance, BP_TX_PRIORITY_HIGH))
             increment_protocol_error();
         break;

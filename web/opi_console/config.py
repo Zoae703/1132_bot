@@ -151,6 +151,7 @@ class FeatureConfig(StrictConfigModel):
     manual_pwm: bool = True
     motor_mapping: bool = True
     motion_tuning: bool = True
+    depth_hold: bool = True
     gamepad_control: bool = True
     sensor_stream: bool = True
     emergency_stop: bool = True
@@ -163,6 +164,12 @@ class MotorMappingConfig(StrictConfigModel):
 class MotionTuningConfig(StrictConfigModel):
     file: str = "config/motion_tuning.json"
     sync_interval_s: float = Field(default=0.5, ge=0.1, le=10)
+
+
+class DepthPidTuningConfig(StrictConfigModel):
+    file: str = "config/depth_pid_tuning.json"
+    sync_interval_s: float = Field(default=0.5, ge=0.1, le=10)
+    control_report_hz: float = Field(default=5.0, ge=0.5, le=20.0)
 
 
 class GamepadConfig(StrictConfigModel):
@@ -219,6 +226,8 @@ class AppConfig(StrictConfigModel):
     features: FeatureConfig = Field(default_factory=FeatureConfig)
     motor_mapping: MotorMappingConfig = Field(default_factory=MotorMappingConfig)
     motion_tuning: MotionTuningConfig = Field(default_factory=MotionTuningConfig)
+    depth_pid_tuning: DepthPidTuningConfig = Field(
+        default_factory=DepthPidTuningConfig)
     gamepad: GamepadConfig = Field(default_factory=GamepadConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
 
@@ -255,6 +264,21 @@ class AppConfig(StrictConfigModel):
                 "pwm_slew_rate_max_us_per_s": 5000,
                 "command_timeout_min_ms": 200,
                 "command_timeout_max_ms": 2000,
+            },
+            "depth_pid": {
+                "kp_min": 0.0,
+                "kp_max": 100.0,
+                "ki_min": 0.0,
+                "ki_max": 10.0,
+                "kd_min": 0.0,
+                "kd_max": 100.0,
+                "term_limit_min_us": 0.0,
+                "term_limit_max_us": 200.0,
+                "output_limit_min_us": 1.0,
+                "output_limit_max_us": 200.0,
+                "target_depth_min_m": 0.0,
+                "target_depth_max_m": 300.0,
+                "lease_timeout_ms": 500,
             },
             "gamepad": self.gamepad.model_dump(),
             "telemetry": {

@@ -72,6 +72,22 @@ export interface RobotStatus {
   motion_tuning_synced: boolean;
   motion_tuning_sync_state: string;
   motion_tuning_sync_error: string | null;
+  depth_sensor_ready: boolean;
+  depth_sample_valid: boolean;
+  depth_sample_age_ms: number | null;
+  depth_requested_target_m: number;
+  depth_active_setpoint_m: number;
+  depth_error_m: number;
+  depth_pid_p_us: number;
+  depth_pid_i_us: number;
+  depth_pid_d_us: number;
+  depth_pid_output_us: number;
+  depth_pid_saturated: boolean;
+  depth_actuator_ready: boolean;
+  depth_pid_tuning_synced: boolean;
+  depth_pid_tuning_sync_state: string;
+  depth_pid_tuning_sync_error: string | null;
+  last_depth_control_report_at: number;
   estop_locked: boolean;
   backend_motion_inhibited: boolean;
   backend_motion_inhibit_reason: string | null;
@@ -241,6 +257,30 @@ export function normalizeStatus(raw: unknown): RobotStatus {
       source.motion_tuning_sync_state) ?? 'pending',
     motion_tuning_sync_error: asOptionalString(
       source.motion_tuning_sync_error),
+    depth_sensor_ready: asBool(source.depth_sensor_ready),
+    depth_sample_valid: asBool(source.depth_sample_valid),
+    depth_sample_age_ms: nullableNumber(source.depth_sample_age_ms),
+    depth_requested_target_m: asNumber(
+      source.depth_requested_target_m,
+      NaN,
+    ),
+    depth_active_setpoint_m: asNumber(source.depth_active_setpoint_m, NaN),
+    depth_error_m: asNumber(source.depth_error_m, NaN),
+    depth_pid_p_us: asNumber(source.depth_pid_p_us, NaN),
+    depth_pid_i_us: asNumber(source.depth_pid_i_us, NaN),
+    depth_pid_d_us: asNumber(source.depth_pid_d_us, NaN),
+    depth_pid_output_us: asNumber(source.depth_pid_output_us, NaN),
+    depth_pid_saturated: asBool(source.depth_pid_saturated),
+    depth_actuator_ready: asBool(source.depth_actuator_ready),
+    depth_pid_tuning_synced: asBool(source.depth_pid_tuning_synced),
+    depth_pid_tuning_sync_state: asOptionalString(
+      source.depth_pid_tuning_sync_state) ?? 'pending',
+    depth_pid_tuning_sync_error: asOptionalString(
+      source.depth_pid_tuning_sync_error),
+    last_depth_control_report_at: asNumber(
+      source.last_depth_control_report_at,
+      0,
+    ),
     // Missing emergency-stop state is unsafe: keep motion controls locked.
     estop_locked: safetyState === 5 || asBool(source.estop_locked, true),
     backend_motion_inhibited: asBool(source.backend_motion_inhibited, true),

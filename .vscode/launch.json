@@ -6,11 +6,11 @@
       "type": "cortex-debug",
       "request": "launch",
       "cwd": "${workspaceFolder}",
-      "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+      "executable": "${workspaceFolder}/firmware/build/Debug/1132_bot.elf",
       "servertype": "openocd",
       "serverpath": "/home/zoae/.local/xpack-openocd/bin/openocd",
       "configFiles": [
-        "${workspaceFolder}/openocd.cfg"
+        "${workspaceFolder}/firmware/openocd.cfg"
       ],
       "gdbPath": "/usr/bin/gdb-multiarch",
       "showDevDebugOutput": "raw",
@@ -30,7 +30,7 @@
       "type": "cortex-debug",
       "request": "launch",
       "cwd": "${workspaceFolder}",
-      "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+      "executable": "${workspaceFolder}/firmware/build/Debug/1132_bot.elf",
       "servertype": "openocd",
       "serverpath": "/home/zoae/.local/xpack-openocd/bin/openocd",
       "configFiles": [

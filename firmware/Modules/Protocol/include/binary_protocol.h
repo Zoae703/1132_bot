@@ -165,6 +165,10 @@ bool bp_queue_status_report(BinaryProtocol *bp, BpTxPriority priority);
 bool bp_queue_sensor_report(BinaryProtocol *bp, BpTxPriority priority);
 bool bp_queue_motion_tuning_report(BinaryProtocol *bp,
                                    BpTxPriority priority);
+bool bp_queue_depth_pid_tuning_report(BinaryProtocol *bp,
+                                     BpTxPriority priority);
+bool bp_queue_depth_control_report(BinaryProtocol *bp,
+                                  BpTxPriority priority);
 
 /**
  * @brief  Reset the RX parser (e.g. after a timeout / sync loss).

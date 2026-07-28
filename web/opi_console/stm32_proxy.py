@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "protocol", "sh
 
 from protocol import (
     MsgType, SafetyState, NeutralReason,
-    SetPwm, SetBodyCommand, MotionTuning, StatusReport, SensorReport,
+    SetPwm, SetDepth, SetBodyCommand, MotionTuning, DepthPidTuning,
+    StatusReport, SensorReport, DepthControlReport,
     HeartbeatAck, SafetyEvent,
 )
 
@@ -30,6 +31,12 @@ from opi_console.motion_tuning import (
     clone_motion_tuning,
     motion_tuning_equal,
     validate_motion_tuning,
+)
+from opi_console.depth_pid_tuning import (
+    DepthPidTuningStore,
+    clone_depth_pid_tuning,
+    depth_pid_tuning_equal,
+    validate_depth_pid_tuning,
 )
 
 logger = logging.getLogger("opi_console.proxy")
@@ -58,9 +65,12 @@ class CachedState:
     last_heartbeat_ack_at: float = 0.0
     last_status_report_at: float = 0.0
     last_sensor_report_at: float = 0.0
+    last_depth_control_report_at: float = 0.0
     last_command_ack_at: float = 0.0
     _last_status_report_mono: float = field(default=0.0, repr=False)
     _last_sensor_report_mono: float = field(default=0.0, repr=False)
+    _last_depth_control_report_mono: float = field(
+        default=0.0, repr=False)
 
     # Sensors
     depth_m: float = 0.0
@@ -80,6 +90,23 @@ class CachedState:
     motion_tuning_synced: bool = False
     motion_tuning_sync_state: str = "pending"
     motion_tuning_sync_error: Optional[str] = None
+    depth_pid_tuning_synced: bool = False
+    depth_pid_tuning_sync_state: str = "pending"
+    depth_pid_tuning_sync_error: Optional[str] = None
+    depth_control_stale: bool = True
+
+    # Depth-control diagnostics, updated only by DEPTH_CONTROL_REPORT.
+    depth_requested_target_cm: float = 0.0
+    depth_active_setpoint_cm: float = 0.0
+    depth_measured_cm: float = 0.0
+    depth_error_cm: float = 0.0
+    depth_pid_p_us: float = 0.0
+    depth_pid_i_us: float = 0.0
+    depth_pid_d_us: float = 0.0
+    depth_pid_output_us: float = 0.0
+    depth_sample_age_ms: int = 0
+    depth_control_flags: int = 0
+    depth_fault_reason: int = 0
 
     @property
     def confirmed_pwm(self) -> List[int]:
@@ -129,6 +156,10 @@ class CachedState:
             now_mono - self._last_sensor_report_mono
             if self._last_sensor_report_mono else None
         )
+        depth_control_age = (
+            now_mono - self._last_depth_control_report_mono
+            if self._last_depth_control_report_mono else None
+        )
         try:
             safety_state_name = SafetyState(self.safety_state).name
         except ValueError:
@@ -156,6 +187,51 @@ class CachedState:
             "motion_tuning_synced": self.motion_tuning_synced,
             "motion_tuning_sync_state": self.motion_tuning_sync_state,
             "motion_tuning_sync_error": self.motion_tuning_sync_error,
+            "depth_pid_tuning_synced": self.depth_pid_tuning_synced,
+            "depth_pid_tuning_sync_state": self.depth_pid_tuning_sync_state,
+            "depth_pid_tuning_sync_error": self.depth_pid_tuning_sync_error,
+            "depth_requested_target_m": _json_number(
+                self.depth_requested_target_cm / 100.0),
+            "depth_active_setpoint_m": _json_number(
+                self.depth_active_setpoint_cm / 100.0),
+            "depth_error_m": _json_number(self.depth_error_cm / 100.0),
+            "depth_pid_p_us": _json_number(self.depth_pid_p_us),
+            "depth_pid_i_us": _json_number(self.depth_pid_i_us),
+            "depth_pid_d_us": _json_number(self.depth_pid_d_us),
+            "depth_pid_output_us": _json_number(
+                self.depth_pid_output_us),
+            "depth_sample_age_ms": self.depth_sample_age_ms,
+            "depth_sensor_ready": bool(self.depth_control_flags & 0x02),
+            "depth_sample_valid": bool(self.depth_control_flags & 0x04),
+            "depth_pid_saturated": bool(
+                self.depth_control_flags & 0x08),
+            "depth_actuator_ready": bool(
+                self.depth_control_flags & 0x20),
+            "depth_control": {
+                "requested_target_cm": _json_number(
+                    self.depth_requested_target_cm),
+                "active_setpoint_cm": _json_number(
+                    self.depth_active_setpoint_cm),
+                "measured_depth_cm": _json_number(self.depth_measured_cm),
+                "error_cm": _json_number(self.depth_error_cm),
+                "p_term_us": _json_number(self.depth_pid_p_us),
+                "i_term_us": _json_number(self.depth_pid_i_us),
+                "d_term_us": _json_number(self.depth_pid_d_us),
+                "output_us": _json_number(self.depth_pid_output_us),
+                "sample_age_ms": self.depth_sample_age_ms,
+                "flags": self.depth_control_flags,
+                "fault_reason": self.depth_fault_reason,
+                "enabled": bool(self.depth_control_flags & 0x01),
+                "sensor_ready": bool(self.depth_control_flags & 0x02),
+                "sample_fresh_valid": bool(
+                    self.depth_control_flags & 0x04),
+                "pid_saturated": bool(self.depth_control_flags & 0x08),
+                "vertical_saturated": bool(
+                    self.depth_control_flags & 0x10),
+                "actuator_ready": bool(self.depth_control_flags & 0x20),
+                "stale": self.depth_control_stale,
+                "last_report_at": self.last_depth_control_report_at,
+            },
             "pwm": list(self.pwm),
             "confirmed_pwm": list(self.pwm),
             "requested_pwm": list(self.requested_pwm),
@@ -171,6 +247,8 @@ class CachedState:
             "last_heartbeat_ack_at": self.last_heartbeat_ack_at,
             "last_status_report_at": self.last_status_report_at,
             "last_sensor_report_at": self.last_sensor_report_at,
+            "last_depth_control_report_at": (
+                self.last_depth_control_report_at),
             "last_command_ack_at": self.last_command_ack_at,
             "last_update": self.last_status_report_at,
             "desired_last_update": self.last_request_at,
@@ -178,6 +256,11 @@ class CachedState:
             "sensors_stale": self.sensors_stale,
             "status_age_ms": int(status_age * 1000) if status_age is not None else None,
             "sensors_age_ms": int(sensors_age * 1000) if sensors_age is not None else None,
+            "depth_control_age_ms": (
+                int(depth_control_age * 1000)
+                if depth_control_age is not None else None
+            ),
+            "depth_control_stale": self.depth_control_stale,
             "stm32_online": self.stm32_online,
             "serial_connected": self.serial_connected,
         }
@@ -240,14 +323,22 @@ class Stm32Proxy:
             telemetry_cfg.command_confirmation_poll_interval_s)
         self._sensor_poll_task: Optional[asyncio.Task] = None
         self._motion_tuning_sync_task: Optional[asyncio.Task] = None
+        self._depth_control_poll_task: Optional[asyncio.Task] = None
+        self._depth_pid_tuning_sync_task: Optional[asyncio.Task] = None
         self._status_request_lock = asyncio.Lock()
         self._sensor_request_lock = asyncio.Lock()
         self._motion_tuning_request_lock = asyncio.Lock()
         self._motion_tuning_apply_lock = asyncio.Lock()
+        self._depth_pid_tuning_request_lock = asyncio.Lock()
+        self._depth_pid_tuning_apply_lock = asyncio.Lock()
+        self._depth_control_request_lock = asyncio.Lock()
         self._sensor_request_in_flight = False
         self.sensor_poll_requests = 0
         self.sensor_poll_failures = 0
+        self.depth_control_poll_requests = 0
+        self.depth_control_poll_failures = 0
         self._last_sensor_poll_warning_mono = 0.0
+        self._last_depth_control_poll_warning_mono = 0.0
         self._logged_online = False
         self._last_stm32_uptime_s: Optional[int] = None
         self._connection_generation = transport.connection_generation
@@ -258,10 +349,22 @@ class Stm32Proxy:
         self._confirmed_motion_tuning: Optional[MotionTuning] = None
         self._motion_tuning_sync_interval_s = (
             self.config.motion_tuning.sync_interval_s)
+        self._depth_pid_tuning_store = DepthPidTuningStore(
+            self.config.resolve_path(self.config.depth_pid_tuning.file))
+        self._desired_depth_pid_tuning = (
+            self._depth_pid_tuning_store.load())
+        self._confirmed_depth_pid_tuning: Optional[DepthPidTuning] = None
+        self._depth_pid_tuning_sync_interval_s = (
+            self.config.depth_pid_tuning.sync_interval_s)
+        self._depth_control_poll_hz = (
+            self.config.depth_pid_tuning.control_report_hz)
+        self._depth_control_stale_timeout_s = max(
+            1.0, 3.0 / self._depth_control_poll_hz)
         self.last_command_sequence: Optional[int] = None
         self._event_callbacks: Dict[str, List[Callable]] = {
             "status": [],
             "sensors": [],
+            "depth_control": [],
             "connection": [],
             "event": [],
         }
@@ -309,7 +412,24 @@ class Stm32Proxy:
             or (now_mono - self._state._last_sensor_report_mono)
             > self._sensors_stale_timeout_s
         )
+        self._state.depth_control_stale = (not online) or (
+            self._state._last_depth_control_report_mono == 0.0
+            or (now_mono - self._state._last_depth_control_report_mono)
+            > self._depth_control_stale_timeout_s
+        )
         return self._state
+
+    def _invalidate_depth_caches(self):
+        self._state.last_depth_control_report_at = 0.0
+        self._state._last_depth_control_report_mono = 0.0
+        self._state.depth_control_stale = True
+        self._state.depth_control_flags = 0
+        self._state.depth_sample_age_ms = 0
+        self._state.depth_fault_reason = 0
+        self._state.depth_pid_tuning_synced = False
+        self._state.depth_pid_tuning_sync_state = "pending"
+        self._state.depth_pid_tuning_sync_error = None
+        self._confirmed_depth_pid_tuning = None
 
     def _sync_connection_generation(self):
         generation = self._transport.connection_generation
@@ -336,6 +456,7 @@ class Stm32Proxy:
         self._state.motion_tuning_sync_state = "pending"
         self._state.motion_tuning_sync_error = None
         self._confirmed_motion_tuning = None
+        self._invalidate_depth_caches()
         self._last_stm32_uptime_s = None
         self._neutral_reason_override = None
 
@@ -362,6 +483,21 @@ class Stm32Proxy:
             "persist_path": str(self._motion_tuning_store.path),
         }
 
+    def depth_pid_tuning_snapshot(self) -> dict:
+        self.refresh_link_state()
+        return {
+            "desired": self._desired_depth_pid_tuning.to_dict(),
+            "confirmed": (
+                self._confirmed_depth_pid_tuning.to_dict()
+                if self._confirmed_depth_pid_tuning is not None
+                else None
+            ),
+            "synced": self._state.depth_pid_tuning_synced,
+            "sync_state": self._state.depth_pid_tuning_sync_state,
+            "sync_error": self._state.depth_pid_tuning_sync_error,
+            "persist_path": str(self._depth_pid_tuning_store.path),
+        }
+
     async def start_background_tasks(self):
         """Start process-wide telemetry and tuning synchronization loops."""
         if (
@@ -384,6 +520,29 @@ class Stm32Proxy:
                 self._motion_tuning_sync_loop(),
                 name="stm32-motion-tuning-sync",
             )
+        if (
+            self.config.features.depth_hold
+            and self._depth_control_poll_hz > 0
+            and (
+                self._depth_control_poll_task is None
+                or self._depth_control_poll_task.done()
+            )
+        ):
+            self._depth_control_poll_task = asyncio.create_task(
+                self._depth_control_poll_loop(),
+                name="stm32-depth-control-poll",
+            )
+        if (
+            self.config.features.depth_hold
+            and (
+                self._depth_pid_tuning_sync_task is None
+                or self._depth_pid_tuning_sync_task.done()
+            )
+        ):
+            self._depth_pid_tuning_sync_task = asyncio.create_task(
+                self._depth_pid_tuning_sync_loop(),
+                name="stm32-depth-pid-tuning-sync",
+            )
 
     @property
     def sensor_poll_task_running(self) -> bool:
@@ -399,16 +558,34 @@ class Stm32Proxy:
             and not self._motion_tuning_sync_task.done()
         )
 
+    @property
+    def depth_control_poll_task_running(self) -> bool:
+        return bool(
+            self._depth_control_poll_task is not None
+            and not self._depth_control_poll_task.done()
+        )
+
+    @property
+    def depth_pid_tuning_sync_task_running(self) -> bool:
+        return bool(
+            self._depth_pid_tuning_sync_task is not None
+            and not self._depth_pid_tuning_sync_task.done()
+        )
+
     async def stop_background_tasks(self):
         tasks = [
             task for task in (
                 self._sensor_poll_task,
                 self._motion_tuning_sync_task,
+                self._depth_control_poll_task,
+                self._depth_pid_tuning_sync_task,
             )
             if task is not None and not task.done()
         ]
         self._sensor_poll_task = None
         self._motion_tuning_sync_task = None
+        self._depth_control_poll_task = None
+        self._depth_pid_tuning_sync_task = None
         for task in tasks:
             task.cancel()
         if tasks:
@@ -463,6 +640,62 @@ class Stm32Proxy:
                 logger.exception(
                     "Motion tuning synchronization recovered from an error")
                 await asyncio.sleep(self._motion_tuning_sync_interval_s)
+
+    async def _depth_control_poll_loop(self):
+        """Poll diagnostics only; never refresh the SET_DEPTH control lease."""
+        interval = 1.0 / self._depth_control_poll_hz
+        while True:
+            try:
+                state = self.refresh_link_state()
+                if self._transport.connected and state.stm32_online:
+                    self.depth_control_poll_requests += 1
+                    result = await self.request_depth_control()
+                    if result is None:
+                        self.depth_control_poll_failures += 1
+                        now = time.monotonic()
+                        if (
+                            now - self._last_depth_control_poll_warning_mono
+                            >= 10.0
+                        ):
+                            logger.warning(
+                                "Depth-control polling request timed out "
+                                "(failures=%d)",
+                                self.depth_control_poll_failures,
+                            )
+                            self._last_depth_control_poll_warning_mono = now
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.depth_control_poll_failures += 1
+                logger.exception(
+                    "Depth-control polling task recovered from an error")
+                await asyncio.sleep(interval)
+
+    async def _depth_pid_tuning_sync_loop(self):
+        while True:
+            try:
+                state = self.refresh_link_state()
+                if (
+                    self._transport.connected
+                    and state.stm32_online
+                    and not state.depth_pid_tuning_synced
+                    and state.safety_state in (
+                        SafetyState.DISARMED,
+                        SafetyState.ARMED_IDLE,
+                    )
+                ):
+                    await self.synchronize_depth_pid_tuning()
+                await asyncio.sleep(self._depth_pid_tuning_sync_interval_s)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._state.depth_pid_tuning_synced = False
+                self._state.depth_pid_tuning_sync_state = "error"
+                self._state.depth_pid_tuning_sync_error = str(exc)
+                logger.exception(
+                    "Depth PID tuning synchronization recovered from an error")
+                await asyncio.sleep(self._depth_pid_tuning_sync_interval_s)
 
     # -------- Event callbacks --------
 
@@ -824,6 +1057,203 @@ class Stm32Proxy:
             self._state.motion_tuning_sync_error = None
             return await self._synchronize_motion_tuning_locked()
 
+    def _set_depth_pid_tuning_error(self, message: str):
+        self._state.depth_pid_tuning_synced = False
+        self._state.depth_pid_tuning_sync_state = "error"
+        self._state.depth_pid_tuning_sync_error = message
+
+    def _confirm_depth_pid_tuning(self, tuning: DepthPidTuning):
+        self._confirmed_depth_pid_tuning = clone_depth_pid_tuning(tuning)
+        synced = depth_pid_tuning_equal(
+            self._desired_depth_pid_tuning,
+            self._confirmed_depth_pid_tuning,
+        )
+        self._state.depth_pid_tuning_synced = synced
+        self._state.depth_pid_tuning_sync_state = (
+            "synced" if synced else "mismatch")
+        self._state.depth_pid_tuning_sync_error = (
+            None if synced
+            else "STM32 depth PID tuning differs from persisted tuning")
+
+    async def _synchronize_depth_pid_tuning_locked(self) -> bool:
+        state = self.refresh_link_state()
+        if not self._transport.connected or not state.stm32_online:
+            self._set_depth_pid_tuning_error("STM32 is offline")
+            return False
+        if state.status_stale:
+            report = await self.request_status()
+            if report is None:
+                self._set_depth_pid_tuning_error(
+                    "status confirmation timed out before depth PID sync")
+                return False
+            state = self.refresh_link_state()
+        if state.safety_state not in (
+            SafetyState.DISARMED,
+            SafetyState.ARMED_IDLE,
+        ):
+            self._state.depth_pid_tuning_synced = False
+            self._state.depth_pid_tuning_sync_state = "waiting_for_stop"
+            self._state.depth_pid_tuning_sync_error = (
+                "Stop motion before applying depth PID tuning")
+            return False
+
+        self._state.depth_pid_tuning_sync_state = "checking"
+        self._state.depth_pid_tuning_sync_error = None
+        current = await self.request_depth_pid_tuning()
+        if depth_pid_tuning_equal(current, self._desired_depth_pid_tuning):
+            self._confirm_depth_pid_tuning(current)
+            return True
+
+        self._state.depth_pid_tuning_sync_state = "applying"
+        result = await self._transport.send_frame(
+            MsgType.SET_DEPTH_PID_TUNING,
+            self._desired_depth_pid_tuning.pack(),
+            expect_ack=True,
+        )
+        self.last_command_sequence = (
+            result if result is not None
+            else self._transport.last_command_sequence_attempted
+        )
+        if result is None:
+            self._set_depth_pid_tuning_error(
+                self._transport.last_error or "depth PID tuning ACK timeout")
+            return False
+
+        confirmed = await self.request_depth_pid_tuning()
+        if confirmed is None:
+            self._set_depth_pid_tuning_error(
+                "depth PID tuning report confirmation timeout")
+            return False
+        self._confirm_depth_pid_tuning(confirmed)
+        return self._state.depth_pid_tuning_synced
+
+    async def synchronize_depth_pid_tuning(self) -> bool:
+        if not self.config.features.depth_hold:
+            self._set_depth_pid_tuning_error(
+                "Depth-hold feature is disabled")
+            return False
+        async with self._depth_pid_tuning_apply_lock:
+            return await self._synchronize_depth_pid_tuning_locked()
+
+    async def ensure_depth_pid_tuning_synced(self) -> bool:
+        # Re-read before enabling. A board reset can restore firmware defaults
+        # without causing the UART device to disconnect.
+        return await self.synchronize_depth_pid_tuning()
+
+    async def set_depth_pid_tuning(
+        self,
+        tuning: DepthPidTuning,
+        persist: bool = True,
+    ) -> bool:
+        desired = validate_depth_pid_tuning(
+            clone_depth_pid_tuning(tuning))
+        async with self._depth_pid_tuning_apply_lock:
+            state = self.refresh_link_state()
+            if state.safety_state not in (
+                SafetyState.DISARMED,
+                SafetyState.ARMED_IDLE,
+            ):
+                self._state.depth_pid_tuning_sync_state = "waiting_for_stop"
+                self._state.depth_pid_tuning_sync_error = (
+                    "Stop motion before applying depth PID tuning")
+                return False
+            if persist:
+                self._depth_pid_tuning_store.save(desired)
+            self._desired_depth_pid_tuning = desired
+            self._state.depth_pid_tuning_synced = False
+            self._state.depth_pid_tuning_sync_state = "pending"
+            self._state.depth_pid_tuning_sync_error = None
+            return await self._synchronize_depth_pid_tuning_locked()
+
+    async def enable_depth_hold(self) -> bool:
+        self._state.last_command_error = None
+        if not self.config.features.depth_hold:
+            self._state.last_command_error = "Depth-hold feature is disabled"
+            return False
+        if not await self.ensure_depth_pid_tuning_synced():
+            self._state.last_command_error = (
+                self._state.depth_pid_tuning_sync_error
+                or "depth PID tuning is not synchronized")
+            return False
+        result = await self._transport.send_frame(
+            MsgType.FLOAT_ON, expect_ack=True)
+        if result is None:
+            self._state.last_command_error = (
+                self._transport.last_error or "FLOAT_ON failed")
+            return False
+        self.last_command_sequence = result
+        status = await self.request_status()
+        if (
+            status is None
+            or status.safety_state != SafetyState.ARMED_ACTIVE
+            or not status.float_enabled
+        ):
+            self._state.last_command_error = (
+                "FLOAT_ON status confirmation timeout")
+            return False
+        report = await self.request_depth_control()
+        if (
+            report is None
+            or not report.enabled
+            or not report.sensor_ready
+            or not report.sample_fresh_valid
+            or not report.actuator_ready
+        ):
+            self._state.last_command_error = (
+                "FLOAT_ON depth-control readiness confirmation failed")
+            return False
+        self._state.last_command_error = None
+        return True
+
+    async def disable_depth_hold(self) -> bool:
+        self._begin_pwm_request([self._neutral_us] * self._channel_count)
+        result = await self._transport.send_frame(
+            MsgType.FLOAT_OFF, expect_ack=True)
+        if result is None:
+            self._fail_pwm_request()
+            return False
+        self.last_command_sequence = result
+        report = await self.request_status()
+        pwm_ok = self._confirm_pwm_from_report(report)
+        state_ok = bool(
+            self._confirm_safety_state(
+                report, (SafetyState.ARMED_IDLE,), "FLOAT_OFF")
+            and report is not None
+            and not report.float_enabled
+        )
+        if not state_ok and self._state.last_command_error is None:
+            self._state.last_command_error = (
+                "FLOAT_OFF did not clear depth-hold mode")
+        return pwm_ok and state_ok
+
+    async def set_depth_cm(self, target_depth_cm: float) -> bool:
+        if (
+            isinstance(target_depth_cm, bool)
+            or not isinstance(target_depth_cm, (int, float))
+            or not math.isfinite(target_depth_cm)
+            or target_depth_cm < 0.0
+            or target_depth_cm > 30000.0
+        ):
+            self._state.last_command_error = (
+                "target depth must be finite and within 0.0..30000.0 cm")
+            return False
+        command = SetDepth(target_depth_cm=float(target_depth_cm))
+        result = await self._transport.send_frame(
+            MsgType.SET_DEPTH,
+            command.pack(),
+            expect_ack=True,
+        )
+        self.last_command_sequence = (
+            result if result is not None
+            else self._transport.last_command_sequence_attempted
+        )
+        if result is None:
+            self._state.last_command_error = (
+                self._transport.last_error or "SET_DEPTH failed")
+            return False
+        self._state.last_command_error = None
+        return True
+
     async def enable_body_control(self) -> bool:
         self._state.last_command_error = None
         if not await self.ensure_motion_tuning_synced():
@@ -1023,6 +1453,101 @@ class Stm32Proxy:
             finally:
                 self._transport.remove_frame_callback(on_tuning)
 
+    async def request_depth_pid_tuning(
+        self, timeout: Optional[float] = None
+    ) -> Optional[DepthPidTuning]:
+        async with self._depth_pid_tuning_request_lock:
+            if not self._transport.connected:
+                return None
+            future = asyncio.get_running_loop().create_future()
+
+            async def on_tuning(msg_type, seq, payload):
+                if (
+                    msg_type == MsgType.DEPTH_PID_TUNING_REPORT
+                    and not future.done()
+                ):
+                    future.set_result(payload)
+
+            self._transport.on_frame(on_tuning)
+            await self._transport.send_frame(
+                MsgType.REQUEST_DEPTH_PID_TUNING)
+            try:
+                payload = await asyncio.wait_for(
+                    future,
+                    timeout
+                    if timeout is not None
+                    else self._report_request_timeout_s,
+                )
+                tuning = DepthPidTuning.unpack(payload)
+                validate_depth_pid_tuning(tuning)
+                return tuning
+            except (
+                asyncio.TimeoutError,
+                struct.error,
+                ValueError,
+                OverflowError,
+            ) as exc:
+                if not isinstance(exc, asyncio.TimeoutError):
+                    logger.warning(
+                        "Invalid DEPTH_PID_TUNING_REPORT payload: %s", exc)
+                return None
+            finally:
+                self._transport.remove_frame_callback(on_tuning)
+
+    async def request_depth_control(
+        self, timeout: Optional[float] = None
+    ) -> Optional[DepthControlReport]:
+        async with self._depth_control_request_lock:
+            if not self._transport.connected:
+                return None
+            future = asyncio.get_running_loop().create_future()
+
+            async def on_report(msg_type, seq, payload):
+                if (
+                    msg_type == MsgType.DEPTH_CONTROL_REPORT
+                    and not future.done()
+                ):
+                    future.set_result(payload)
+
+            self._transport.on_frame(on_report)
+            await self._transport.send_frame(MsgType.REQUEST_DEPTH_CONTROL)
+            try:
+                payload = await asyncio.wait_for(
+                    future,
+                    timeout
+                    if timeout is not None
+                    else self._report_request_timeout_s,
+                )
+                report = DepthControlReport.unpack(payload)
+                if any(
+                    not math.isfinite(value)
+                    for value in (
+                        report.requested_target_cm,
+                        report.active_setpoint_cm,
+                        report.measured_depth_cm,
+                        report.error_cm,
+                        report.p_term_us,
+                        report.i_term_us,
+                        report.d_term_us,
+                        report.output_us,
+                    )
+                ):
+                    raise ValueError(
+                        "depth-control report contains non-finite values")
+                return report
+            except (
+                asyncio.TimeoutError,
+                struct.error,
+                ValueError,
+                OverflowError,
+            ) as exc:
+                if not isinstance(exc, asyncio.TimeoutError):
+                    logger.warning(
+                        "Invalid DEPTH_CONTROL_REPORT payload: %s", exc)
+                return None
+            finally:
+                self._transport.remove_frame_callback(on_report)
+
     # -------- Frame handler --------
 
     async def _on_frame(self, msg_type: int, seq: int, payload: bytes):
@@ -1105,6 +1630,66 @@ class Stm32Proxy:
                     return
                 self._confirm_motion_tuning(tuning)
 
+            elif msg_type == MsgType.DEPTH_PID_TUNING_REPORT:
+                try:
+                    tuning = DepthPidTuning.unpack(payload)
+                    validate_depth_pid_tuning(tuning)
+                except (
+                    struct.error,
+                    ValueError,
+                    OverflowError,
+                ) as exc:
+                    self._transport.rx_errors += 1
+                    logger.warning(
+                        "Invalid DEPTH_PID_TUNING_REPORT payload: %s", exc)
+                    return
+                self._confirm_depth_pid_tuning(tuning)
+
+            elif msg_type == MsgType.DEPTH_CONTROL_REPORT:
+                try:
+                    report = DepthControlReport.unpack(payload)
+                    if any(
+                        not math.isfinite(value)
+                        for value in (
+                            report.requested_target_cm,
+                            report.active_setpoint_cm,
+                            report.measured_depth_cm,
+                            report.error_cm,
+                            report.p_term_us,
+                            report.i_term_us,
+                            report.d_term_us,
+                            report.output_us,
+                        )
+                    ):
+                        raise ValueError(
+                            "depth-control report contains non-finite values")
+                except (
+                    struct.error,
+                    ValueError,
+                    OverflowError,
+                ) as exc:
+                    self._transport.rx_errors += 1
+                    logger.warning(
+                        "Invalid DEPTH_CONTROL_REPORT payload: %s", exc)
+                    return
+                self._state.depth_requested_target_cm = (
+                    report.requested_target_cm)
+                self._state.depth_active_setpoint_cm = (
+                    report.active_setpoint_cm)
+                self._state.depth_measured_cm = report.measured_depth_cm
+                self._state.depth_error_cm = report.error_cm
+                self._state.depth_pid_p_us = report.p_term_us
+                self._state.depth_pid_i_us = report.i_term_us
+                self._state.depth_pid_d_us = report.d_term_us
+                self._state.depth_pid_output_us = report.output_us
+                self._state.depth_sample_age_ms = report.sample_age_ms
+                self._state.depth_control_flags = report.flags
+                self._state.depth_fault_reason = report.fault_reason
+                self._state.last_depth_control_report_at = now_wall
+                self._state._last_depth_control_report_mono = now_mono
+                self._state.depth_control_stale = False
+                emit_event = ("depth_control", self._state)
+
             elif msg_type == MsgType.HEARTBEAT_ACK:
                 try:
                     r = HeartbeatAck.unpack(payload)
@@ -1131,6 +1716,7 @@ class Stm32Proxy:
                     self._state.motion_tuning_sync_state = "pending"
                     self._state.motion_tuning_sync_error = None
                     self._confirmed_motion_tuning = None
+                    self._invalidate_depth_caches()
                     emit_event = ("connection", "stm32_restarted")
 
             elif msg_type == MsgType.SAFETY_EVENT:

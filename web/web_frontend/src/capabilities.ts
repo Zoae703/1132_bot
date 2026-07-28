@@ -13,9 +13,26 @@ export interface FeatureCapabilities {
   manual_pwm: boolean;
   motor_mapping: boolean;
   motion_tuning: boolean;
+  depth_hold: boolean;
   gamepad_control: boolean;
   sensor_stream: boolean;
   emergency_stop: boolean;
+}
+
+export interface DepthPidCapabilities {
+  kp_min: number;
+  kp_max: number;
+  ki_min: number;
+  ki_max: number;
+  kd_min: number;
+  kd_max: number;
+  term_limit_min_us: number;
+  term_limit_max_us: number;
+  output_limit_min_us: number;
+  output_limit_max_us: number;
+  target_depth_min_m: number;
+  target_depth_max_m: number;
+  lease_timeout_ms: number;
 }
 
 export interface GamepadCapabilities {
@@ -65,6 +82,7 @@ export interface Capabilities {
   pwm: PwmCapabilities;
   features: FeatureCapabilities;
   motion_tuning: MotionTuningCapabilities;
+  depth_pid: DepthPidCapabilities;
   gamepad: GamepadCapabilities;
   telemetry: TelemetryCapabilities;
   sensor_poll_hz: number;
@@ -91,6 +109,7 @@ export const LOCKED_CAPABILITIES: Capabilities = {
     manual_pwm: false,
     motor_mapping: false,
     motion_tuning: false,
+    depth_hold: false,
     gamepad_control: false,
     sensor_stream: false,
     emergency_stop: true,
@@ -107,6 +126,21 @@ export const LOCKED_CAPABILITIES: Capabilities = {
     pwm_slew_rate_max_us_per_s: 100,
     command_timeout_min_ms: 200,
     command_timeout_max_ms: 200,
+  },
+  depth_pid: {
+    kp_min: 0,
+    kp_max: 0,
+    ki_min: 0,
+    ki_max: 0,
+    kd_min: 0,
+    kd_max: 0,
+    term_limit_min_us: 0,
+    term_limit_max_us: 0,
+    output_limit_min_us: 0,
+    output_limit_max_us: 0,
+    target_depth_min_m: 0,
+    target_depth_max_m: 0,
+    lease_timeout_ms: 0,
   },
   gamepad: {
     axis_count: 6,
@@ -218,6 +252,69 @@ function normalizeGamepad(
   return result;
 }
 
+function normalizeDepthPid(
+  value: unknown,
+  enabled: boolean,
+): DepthPidCapabilities {
+  if (!enabled) return { ...LOCKED_CAPABILITIES.depth_pid };
+  if (!isRecord(value)) {
+    throw new Error('能力配置缺少 depth_pid 对象');
+  }
+  const result: DepthPidCapabilities = {
+    kp_min: finiteNumber(value.kp_min, 'depth_pid.kp_min'),
+    kp_max: finiteNumber(value.kp_max, 'depth_pid.kp_max'),
+    ki_min: finiteNumber(value.ki_min, 'depth_pid.ki_min'),
+    ki_max: finiteNumber(value.ki_max, 'depth_pid.ki_max'),
+    kd_min: finiteNumber(value.kd_min, 'depth_pid.kd_min'),
+    kd_max: finiteNumber(value.kd_max, 'depth_pid.kd_max'),
+    term_limit_min_us: finiteNumber(
+      value.term_limit_min_us,
+      'depth_pid.term_limit_min_us',
+    ),
+    term_limit_max_us: finiteNumber(
+      value.term_limit_max_us,
+      'depth_pid.term_limit_max_us',
+    ),
+    output_limit_min_us: finiteNumber(
+      value.output_limit_min_us,
+      'depth_pid.output_limit_min_us',
+    ),
+    output_limit_max_us: finiteNumber(
+      value.output_limit_max_us,
+      'depth_pid.output_limit_max_us',
+    ),
+    target_depth_min_m: finiteNumber(
+      value.target_depth_min_m,
+      'depth_pid.target_depth_min_m',
+    ),
+    target_depth_max_m: finiteNumber(
+      value.target_depth_max_m,
+      'depth_pid.target_depth_max_m',
+    ),
+    lease_timeout_ms: integer(
+      value.lease_timeout_ms,
+      'depth_pid.lease_timeout_ms',
+    ),
+  };
+  if (
+    result.kp_min < 0
+    || result.kp_max < result.kp_min
+    || result.ki_min < 0
+    || result.ki_max < result.ki_min
+    || result.kd_min < 0
+    || result.kd_max < result.kd_min
+    || result.term_limit_min_us < 0
+    || result.term_limit_max_us < result.term_limit_min_us
+    || result.output_limit_min_us < 0
+    || result.output_limit_max_us < result.output_limit_min_us
+    || result.target_depth_max_m < result.target_depth_min_m
+    || result.lease_timeout_ms <= 200
+  ) {
+    throw new Error('定深 PID 能力配置范围无效');
+  }
+  return result;
+}
+
 export function normalizeCapabilities(raw: unknown): Capabilities {
   if (!isRecord(raw) || !isRecord(raw.pwm)) {
     throw new Error('能力配置缺少 pwm 对象');
@@ -257,6 +354,7 @@ export function normalizeCapabilities(raw: unknown): Capabilities {
   if (!isRecord(raw.features)) throw new Error('能力配置缺少 features 对象');
   const features = raw.features;
   const gamepadEnabled = features.gamepad_control === true;
+  const depthHoldEnabled = features.depth_hold === true;
   if (!isRecord(raw.motion_tuning)) {
     throw new Error('能力配置缺少 motion_tuning 对象');
   }
@@ -342,11 +440,13 @@ export function normalizeCapabilities(raw: unknown): Capabilities {
       manual_pwm: features.manual_pwm === true,
       motor_mapping: features.motor_mapping === true,
       motion_tuning: features.motion_tuning === true,
+      depth_hold: depthHoldEnabled,
       gamepad_control: gamepadEnabled,
       sensor_stream: features.sensor_stream === true,
       emergency_stop: features.emergency_stop === true,
     },
     motion_tuning: normalizedMotionTuning,
+    depth_pid: normalizeDepthPid(raw.depth_pid, depthHoldEnabled),
     gamepad: normalizeGamepad(raw.gamepad, gamepadEnabled),
     telemetry: {
       status_hz: optionalPositive(telemetry.status_hz, 'telemetry.status_hz'),

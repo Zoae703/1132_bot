@@ -139,12 +139,19 @@ void test_command_lengths_and_abi()
     assert(ProtoMsg_BODY_CONTROL_ON == 0x38U);
     assert(ProtoMsg_BODY_CONTROL_OFF == 0x39U);
     assert(ProtoMsg_SET_MOTION_TUNING == 0x3AU);
+    assert(ProtoMsg_SET_DEPTH_PID_TUNING == 0x3BU);
     assert(ProtoMsg_REQUEST_MOTION_TUNING == 0x42U);
+    assert(ProtoMsg_REQUEST_DEPTH_PID_TUNING == 0x43U);
+    assert(ProtoMsg_REQUEST_DEPTH_CONTROL == 0x44U);
     assert(ProtoMsg_MOTION_TUNING_REPORT == 0x82U);
+    assert(ProtoMsg_DEPTH_PID_TUNING_REPORT == 0x83U);
+    assert(ProtoMsg_DEPTH_CONTROL_REPORT == 0x84U);
     assert(sizeof(ProtoNack) == 4U);
     assert(sizeof(ProtoStatusReport) == 24U);
     assert(sizeof(ProtoSetBodyCommand) == 24U);
     assert(sizeof(ProtoMotionTuning) == 56U);
+    assert(sizeof(ProtoDepthPidTuning) == 28U);
+    assert(sizeof(ProtoDepthControlReport) == 40U);
     assert(bp_expected_command_payload_length(ProtoMsg_SET_PWM, &length));
     assert(length == sizeof(ProtoSetPwm));
     assert(bp_expected_command_payload_length(
@@ -154,7 +161,16 @@ void test_command_lengths_and_abi()
         ProtoMsg_SET_MOTION_TUNING, &length));
     assert(length == sizeof(ProtoMotionTuning));
     assert(bp_expected_command_payload_length(
+        ProtoMsg_SET_DEPTH_PID_TUNING, &length));
+    assert(length == sizeof(ProtoDepthPidTuning));
+    assert(bp_expected_command_payload_length(
         ProtoMsg_BODY_CONTROL_ON, &length));
+    assert(length == 0U);
+    assert(bp_expected_command_payload_length(
+        ProtoMsg_REQUEST_DEPTH_PID_TUNING, &length));
+    assert(length == 0U);
+    assert(bp_expected_command_payload_length(
+        ProtoMsg_REQUEST_DEPTH_CONTROL, &length));
     assert(length == 0U);
     assert(bp_expected_command_payload_length(
         ProtoMsg_REQUEST_MOTION_TUNING, &length));

@@ -22,24 +22,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "protocol", "sh
 from protocol import (
     MAGIC_0, FRAME_OVERHEAD, MAX_PAYLOAD, CRC_SIZE,
     PROTO_BUF_SIZE, MsgType, SafetyState, NackReason, NeutralReason,
-    SetPwm, SetBodyCommand, MotionTuning, StatusReport, SensorReport,
+    SetPwm, SetDepth, SetBodyCommand, MotionTuning, DepthPidTuning,
+    StatusReport, SensorReport, DepthControlReport,
     ProtoAck, ProtoNack,
     SafetyEvent, Heartbeat, HeartbeatAck,
     encode_frame, decode_frame, find_frame_start,
 )
 from opi_console.motion_tuning import validate_motion_tuning
+from opi_console.depth_pid_tuning import validate_depth_pid_tuning
 
 logger = logging.getLogger("opi_console.simulator")
 
 _AXIS_DIRECTIONS = (
     (-1, -1, 0, 0, 0, 1),
-    (0, 0, 1, 1, 1, 0),
-    (0, 0, 1, 1, -1, 0),
-    (-1, 1, 0, 0, 0, 1),
-    (1, 1, 0, 0, 0, 1),
-    (0, 0, 1, -1, -1, 0),
     (0, 0, 1, -1, 1, 0),
-    (1, -1, 0, 0, 0, 1),
+    (0, 0, 1, 1, -1, 0),
+    (-1, 1, 0, 0, 0, 0),
+    (1, -1, 0, 0, 0, -1),
+    (0, 0, -1, 1, 1, 0),
+    (0, 0, -1, -1, -1, 0),
+    (1, 1, 0, 0, 0, 0),
 )
 _HORIZONTAL_CHANNELS = frozenset((0, 3, 4, 7))
 _NEUTRAL_TRIM_US = (0, 0, 0, 0, 0, 0, 0, 0)
@@ -73,7 +75,12 @@ class MockSensors:
         # Depth: slowly drift toward target + sine wave + noise
         if pwm_active is None:
             pwm_active = [1500] * 8
-        vertical_thrust = sum(pwm_active[i] - 1500 for i in [1, 2, 5, 6]) / 4.0
+        vertical_thrust = (
+            (pwm_active[1] - 1500)
+            + (pwm_active[2] - 1500)
+            - (pwm_active[5] - 1500)
+            - (pwm_active[6] - 1500)
+        ) / 4.0
         depth_rate = vertical_thrust * 0.0001  # m/s per PWM offset unit
         self._depth_base += depth_rate * dt_s
         self.depth_m = (
@@ -185,6 +192,25 @@ class SimulatedStm32:
         self.body_command = SetBodyCommand()
         self.body_command_last_at: float = 0.0
         self.motion_tuning = MotionTuning()
+        self.depth_pid_tuning = DepthPidTuning()
+        self.depth_requested_target_cm: float = 150.0
+        self.depth_active_setpoint_cm: float = self.depth_requested_target_cm
+        self.depth_error_cm: float = 0.0
+        self.depth_pid_p_us: float = 0.0
+        self.depth_pid_i_us: float = 0.0
+        self.depth_pid_d_us: float = 0.0
+        self.depth_pid_output_us: float = 0.0
+        self.depth_pid_saturated: bool = False
+        self.depth_sensor_ready: bool = True
+        self.depth_sample_valid: bool = True
+        self.depth_sample_updates_enabled: bool = True
+        self.actuator_output_ready: bool = True
+        self.depth_fault_reason: int = NeutralReason.NONE
+        self.depth_command_last_at: float = 0.0
+        self._depth_sample_at: float = 0.0
+        self._depth_pid_accumulator_s: float = 0.0
+        self._depth_integral_error: float = 0.0
+        self._depth_previous_error: float = 0.0
         self.horizontal_saturated: bool = False
         self.vertical_saturated: bool = False
         self.seq: int = 0
@@ -224,6 +250,7 @@ class SimulatedStm32:
         self._next_status_report = now + self._status_report_interval if self._status_report_interval else 0.0
         self._next_sensor_report = now + self._sensor_report_interval if self._sensor_report_interval else 0.0
         self.last_heartbeat = self._start_time
+        self._depth_sample_at = now
         logger.info("Simulated STM32 started — DISARMED")
 
     async def stop(self):
@@ -254,6 +281,25 @@ class SimulatedStm32:
         self.body_command = SetBodyCommand()
         self.body_command_last_at = 0.0
         self.motion_tuning = MotionTuning()
+        self.depth_pid_tuning = DepthPidTuning()
+        self.depth_requested_target_cm = self.sensors.depth_m * 100.0
+        self.depth_active_setpoint_cm = self.depth_requested_target_cm
+        self.depth_error_cm = 0.0
+        self.depth_pid_p_us = 0.0
+        self.depth_pid_i_us = 0.0
+        self.depth_pid_d_us = 0.0
+        self.depth_pid_output_us = 0.0
+        self.depth_pid_saturated = False
+        self.depth_sensor_ready = True
+        self.depth_sample_valid = True
+        self.depth_sample_updates_enabled = True
+        self.actuator_output_ready = True
+        self.depth_fault_reason = NeutralReason.NONE
+        self.depth_command_last_at = 0.0
+        self._depth_sample_at = now
+        self._depth_pid_accumulator_s = 0.0
+        self._depth_integral_error = 0.0
+        self._depth_previous_error = 0.0
         self.horizontal_saturated = False
         self.vertical_saturated = False
         self.neutral_reason = NeutralReason.NONE
@@ -347,6 +393,12 @@ class SimulatedStm32:
 
         # Update sensors
         self.sensors.update(dt_s, self.pwm)
+        if (
+            self.depth_sensor_ready
+            and self.depth_sample_valid
+            and self.depth_sample_updates_enabled
+        ):
+            self._depth_sample_at = now
 
         # Uptime
         if now - self._last_uptime >= 1.0:
@@ -361,6 +413,27 @@ class SimulatedStm32:
         # Channel test timeout
         if self.active_channel >= 0 and now >= self.channel_deadline:
             await self._cancel_channel_test()
+
+        if self.float_enabled:
+            sample_fresh = bool(
+                self.depth_sensor_ready
+                and self.depth_sample_valid
+                and math.isfinite(self.sensors.depth_m)
+                and -10.0 <= self.sensors.depth_m <= 300.0
+                and self._depth_sample_at > 0.0
+                and (now - self._depth_sample_at) <= 0.5
+            )
+            if not sample_fresh or not self.actuator_output_ready:
+                self._disable_depth_control(
+                    NeutralReason.DEPTH_SENSOR
+                    if not sample_fresh else NeutralReason.FAULT)
+            elif (
+                self.depth_command_last_at <= 0.0
+                or (now - self.depth_command_last_at) > 0.5
+            ):
+                self._disable_depth_control(NeutralReason.COMMAND)
+            else:
+                self._apply_depth_control(dt_s)
 
         if self.body_control_enabled:
             nonzero = any(value != 0.0 for value in self.body_command.values())
@@ -453,13 +526,20 @@ class SimulatedStm32:
             MsgType.EXIT_MANUAL: self._h_exit_manual,
             MsgType.SET_PWM: self._h_set_pwm,
             MsgType.SET_ALL_NEUTRAL: self._h_set_all_neutral,
+            MsgType.FLOAT_ON: self._h_float_on,
+            MsgType.FLOAT_OFF: self._h_float_off,
+            MsgType.SET_DEPTH: self._h_set_depth,
             MsgType.SET_BODY_COMMAND: self._h_set_body_command,
             MsgType.BODY_CONTROL_ON: self._h_body_control_on,
             MsgType.BODY_CONTROL_OFF: self._h_body_control_off,
             MsgType.SET_MOTION_TUNING: self._h_set_motion_tuning,
+            MsgType.SET_DEPTH_PID_TUNING: self._h_set_depth_pid_tuning,
             MsgType.REQUEST_STATUS: self._h_request_status,
             MsgType.REQUEST_SENSORS: self._h_request_sensors,
             MsgType.REQUEST_MOTION_TUNING: self._h_request_motion_tuning,
+            MsgType.REQUEST_DEPTH_PID_TUNING:
+                self._h_request_depth_pid_tuning,
+            MsgType.REQUEST_DEPTH_CONTROL: self._h_request_depth_control,
         }
         handler = handlers.get(msg_type)
         if handler is None:
@@ -476,13 +556,19 @@ class SimulatedStm32:
             MsgType.EXIT_MANUAL: 0,
             MsgType.SET_PWM: 6,
             MsgType.SET_ALL_NEUTRAL: 0,
+            MsgType.FLOAT_ON: 0,
+            MsgType.FLOAT_OFF: 0,
+            MsgType.SET_DEPTH: 4,
             MsgType.SET_BODY_COMMAND: 24,
             MsgType.BODY_CONTROL_ON: 0,
             MsgType.BODY_CONTROL_OFF: 0,
             MsgType.SET_MOTION_TUNING: 56,
+            MsgType.SET_DEPTH_PID_TUNING: 28,
             MsgType.REQUEST_STATUS: 0,
             MsgType.REQUEST_SENSORS: 0,
             MsgType.REQUEST_MOTION_TUNING: 0,
+            MsgType.REQUEST_DEPTH_PID_TUNING: 0,
+            MsgType.REQUEST_DEPTH_CONTROL: 0,
         }
         if len(payload) != expected_lengths[msg_type]:
             self.error_count += 1
@@ -539,6 +625,115 @@ class SimulatedStm32:
         self.horizontal_saturated = False
         self.vertical_saturated = False
         self.neutral_reason = reason
+        if not self.float_enabled:
+            self.depth_command_last_at = 0.0
+            self.depth_fault_reason = int(reason)
+            self._reset_depth_pid_runtime()
+
+    def _reset_depth_pid_runtime(self):
+        self.depth_error_cm = 0.0
+        self.depth_pid_p_us = 0.0
+        self.depth_pid_i_us = 0.0
+        self.depth_pid_d_us = 0.0
+        self.depth_pid_output_us = 0.0
+        self.depth_pid_saturated = False
+        self._depth_pid_accumulator_s = 0.0
+        self._depth_integral_error = 0.0
+        self._depth_previous_error = 0.0
+
+    def _disable_depth_control(self, reason: NeutralReason):
+        self.control_enable = False
+        self.float_enabled = False
+        self.angle_enabled = False
+        self.body_control_enabled = False
+        if (
+            not self.estop_locked
+            and self.safety_state == SafetyState.ARMED_ACTIVE
+        ):
+            self.safety_state = SafetyState.ARMED_IDLE
+        self.depth_command_last_at = 0.0
+        self.depth_fault_reason = int(reason)
+        self._reset_depth_pid_runtime()
+        self._all_neutral(reason)
+
+    def _apply_depth_control(self, dt_s: float):
+        self.depth_active_setpoint_cm = self.depth_requested_target_cm
+        measured_cm = self.sensors.depth_m * 100.0
+        self.depth_error_cm = (
+            self.depth_active_setpoint_cm - measured_cm)
+        self._depth_pid_accumulator_s += max(0.0, dt_s)
+        if self._depth_pid_accumulator_s >= 0.1:
+            self._depth_pid_accumulator_s %= 0.1
+            tuning = self.depth_pid_tuning
+            raw_p = self.depth_error_cm * tuning.kp
+            self.depth_pid_p_us = max(
+                -tuning.p_limit_us,
+                min(tuning.p_limit_us, raw_p),
+            )
+            if tuning.ki != 0.0 and tuning.i_limit_us > 0.0:
+                self._depth_integral_error += self.depth_error_cm
+                integral_error_limit = (
+                    tuning.i_limit_us / abs(tuning.ki))
+                self._depth_integral_error = max(
+                    -integral_error_limit,
+                    min(integral_error_limit, self._depth_integral_error),
+                )
+            else:
+                self._depth_integral_error = 0.0
+            self.depth_pid_i_us = max(
+                -tuning.i_limit_us,
+                min(
+                    tuning.i_limit_us,
+                    self._depth_integral_error * tuning.ki,
+                ),
+            )
+            raw_d = (
+                (self.depth_error_cm - self._depth_previous_error)
+                * tuning.kd
+            )
+            self.depth_pid_d_us = max(
+                -tuning.d_limit_us,
+                min(tuning.d_limit_us, raw_d),
+            )
+            raw_output = (
+                self.depth_pid_p_us
+                + self.depth_pid_i_us
+                + self.depth_pid_d_us
+            )
+            self.depth_pid_output_us = max(
+                -tuning.output_limit_us,
+                min(tuning.output_limit_us, raw_output),
+            )
+            self.depth_pid_saturated = (
+                abs(self.depth_pid_output_us)
+                >= tuning.output_limit_us - 0.001
+            )
+            self._depth_previous_error = self.depth_error_cm
+
+        normalized = self.depth_pid_output_us / 350.0
+        scaled = normalized * self.motion_tuning.axis_gain[2]
+        limited = max(
+            -self.motion_tuning.axis_max_output[2],
+            min(self.motion_tuning.axis_max_output[2], scaled),
+        )
+        self.vertical_saturated = limited != scaled
+        applied = limited * self.motion_tuning.global_multiplier * 350.0
+        delta = (
+            math.floor(applied + 0.5)
+            if applied >= 0.0
+            else math.ceil(applied - 0.5)
+        )
+        for channel, direction in ((1, 1), (2, 1), (5, -1), (6, -1)):
+            channel_delta = direction * delta
+            pwm = self._pwm_neutral + channel_delta
+            if channel_delta > 0:
+                pwm += _DEADZONE_US[channel]
+            elif channel_delta < 0:
+                pwm -= _DEADZONE_US[channel]
+            self.pwm[channel] = max(1000, min(2000, pwm))
+        for channel in _HORIZONTAL_CHANNELS:
+            self.pwm[channel] = self._pwm_neutral
+        self.neutral_reason = NeutralReason.NONE
 
     async def _send_frame(self, msg_type: int, payload: bytes = b"",
                           high_priority: bool = False) -> bool:
@@ -850,6 +1045,97 @@ class SimulatedStm32:
             self.safety_state = SafetyState.ARMED_IDLE
         await self._send_ack(seq)
 
+    async def _h_float_on(self, seq: int, payload: bytes):
+        now = time.monotonic()
+        captured_cm = self.sensors.depth_m * 100.0
+        depth_ready = bool(
+            self.depth_sensor_ready
+            and self.depth_sample_valid
+            and math.isfinite(captured_cm)
+            and 0.0 <= captured_cm <= 30000.0
+            and self._depth_sample_at > 0.0
+            and (now - self._depth_sample_at) <= 0.5
+        )
+        if (
+            self.estop_locked
+            or self.safety_state != SafetyState.ARMED_IDLE
+            or not depth_ready
+            or not self.actuator_output_ready
+        ):
+            reason = (
+                NackReason.ESTOP_LOCKED
+                if self.estop_locked
+                else NackReason.BAD_STATE
+            )
+            await self._send_nack(seq, MsgType.FLOAT_ON, reason)
+            return
+        self.depth_requested_target_cm = captured_cm
+        self.depth_active_setpoint_cm = self.depth_requested_target_cm
+        self._reset_depth_pid_runtime()
+        self.depth_fault_reason = NeutralReason.NONE
+        self.depth_command_last_at = now
+        self.safety_state = SafetyState.ARMED_ACTIVE
+        self.control_enable = True
+        self.float_enabled = True
+        self.angle_enabled = False
+        self.body_control_enabled = False
+        self.body_command = SetBodyCommand()
+        self.body_command_last_at = 0.0
+        self._all_neutral(NeutralReason.NONE)
+        await self._send_ack(seq)
+
+    async def _h_float_off(self, seq: int, payload: bytes):
+        if (
+            self.safety_state != SafetyState.ARMED_ACTIVE
+            or not self.float_enabled
+        ):
+            await self._send_nack(
+                seq, MsgType.FLOAT_OFF, NackReason.BAD_STATE)
+            return
+        self._disable_depth_control(NeutralReason.COMMAND)
+        await self._send_ack(seq)
+
+    async def _h_set_depth(self, seq: int, payload: bytes):
+        try:
+            command = SetDepth.unpack(payload)
+        except struct.error:
+            await self._send_nack(
+                seq, MsgType.SET_DEPTH,
+                NackReason.INVALID_PAYLOAD_LENGTH)
+            return
+        if (
+            not math.isfinite(command.target_depth_cm)
+            or command.target_depth_cm < 0.0
+            or command.target_depth_cm > 30000.0
+        ):
+            await self._send_nack(
+                seq, MsgType.SET_DEPTH, NackReason.INVALID_VALUE)
+            return
+        now = time.monotonic()
+        depth_ready = bool(
+            self.depth_sensor_ready
+            and self.depth_sample_valid
+            and math.isfinite(self.sensors.depth_m)
+            and -10.0 <= self.sensors.depth_m <= 300.0
+            and self._depth_sample_at > 0.0
+            and (now - self._depth_sample_at) <= 0.5
+        )
+        if (
+            self.estop_locked
+            or self.safety_state != SafetyState.ARMED_ACTIVE
+            or not self.float_enabled
+            or not self.control_enable
+            or not depth_ready
+            or not self.actuator_output_ready
+        ):
+            await self._send_nack(
+                seq, MsgType.SET_DEPTH, NackReason.BAD_STATE)
+            return
+        self.depth_requested_target_cm = command.target_depth_cm
+        self.depth_command_last_at = now
+        self.neutral_reason = NeutralReason.NONE
+        await self._send_ack(seq)
+
     async def _h_body_control_on(self, seq: int, payload: bytes):
         if (
             self.estop_locked
@@ -963,6 +1249,96 @@ class SimulatedStm32:
             MsgType.MOTION_TUNING_REPORT,
             self.motion_tuning.pack(),
             high_priority=True,
+        )
+
+    async def _h_set_depth_pid_tuning(self, seq: int, payload: bytes):
+        try:
+            tuning = DepthPidTuning.unpack(payload)
+            validate_depth_pid_tuning(tuning)
+        except (struct.error, ValueError, OverflowError):
+            await self._send_nack(
+                seq, MsgType.SET_DEPTH_PID_TUNING,
+                NackReason.INVALID_VALUE)
+            return
+        if self.estop_locked:
+            await self._send_nack(
+                seq, MsgType.SET_DEPTH_PID_TUNING,
+                NackReason.ESTOP_LOCKED)
+            return
+        if self.safety_state not in (
+            SafetyState.DISARMED,
+            SafetyState.ARMED_IDLE,
+        ):
+            await self._send_nack(
+                seq, MsgType.SET_DEPTH_PID_TUNING,
+                NackReason.BAD_STATE)
+            return
+        self.depth_pid_tuning = tuning
+        self._reset_depth_pid_runtime()
+        await self._send_ack(seq)
+
+    async def _h_request_depth_pid_tuning(
+        self, seq: int, payload: bytes
+    ):
+        await self._send_frame(
+            MsgType.DEPTH_PID_TUNING_REPORT,
+            self.depth_pid_tuning.pack(),
+            high_priority=True,
+        )
+
+    async def _h_request_depth_control(self, seq: int, payload: bytes):
+        await self._send_depth_control_report(high_priority=True)
+
+    async def _send_depth_control_report(
+        self, high_priority: bool = False
+    ):
+        now = time.monotonic()
+        sample_age_ms = (
+            min(
+                0xFFFFFFFF,
+                max(0, int((now - self._depth_sample_at) * 1000)),
+            )
+            if self._depth_sample_at > 0.0
+            else 0xFFFFFFFF
+        )
+        sample_fresh_valid = bool(
+            self.depth_sensor_ready
+            and self.depth_sample_valid
+            and math.isfinite(self.sensors.depth_m)
+            and -10.0 <= self.sensors.depth_m <= 300.0
+            and sample_age_ms <= 500
+        )
+        flags = 0
+        if self.float_enabled and self.control_enable:
+            flags |= 0x01
+        if self.depth_sensor_ready:
+            flags |= 0x02
+        if sample_fresh_valid:
+            flags |= 0x04
+        if self.depth_pid_saturated:
+            flags |= 0x08
+        if self.vertical_saturated:
+            flags |= 0x10
+        if self.actuator_output_ready:
+            flags |= 0x20
+        report = DepthControlReport(
+            requested_target_cm=self.depth_requested_target_cm,
+            active_setpoint_cm=self.depth_active_setpoint_cm,
+            measured_depth_cm=self.sensors.depth_m * 100.0,
+            error_cm=self.depth_error_cm,
+            p_term_us=self.depth_pid_p_us,
+            i_term_us=self.depth_pid_i_us,
+            d_term_us=self.depth_pid_d_us,
+            output_us=self.depth_pid_output_us,
+            sample_age_ms=sample_age_ms,
+            flags=flags,
+            fault_reason=int(self.depth_fault_reason),
+            reserved=0,
+        )
+        await self._send_frame(
+            MsgType.DEPTH_CONTROL_REPORT,
+            report.pack(),
+            high_priority=high_priority,
         )
 
     async def _h_request_status(self, seq: int, payload: bytes):

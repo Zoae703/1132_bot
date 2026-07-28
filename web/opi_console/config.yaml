@@ -60,6 +60,7 @@ features:
   manual_pwm: true
   motor_mapping: true
   motion_tuning: true
+  depth_hold: true
   gamepad_control: true
   sensor_stream: true
   emergency_stop: true
@@ -70,6 +71,11 @@ motor_mapping:
 motion_tuning:
   file: config/motion_tuning.json
   sync_interval_s: 0.5
+
+depth_pid_tuning:
+  file: config/depth_pid_tuning.json
+  sync_interval_s: 0.5
+  control_report_hz: 5
 
 gamepad:
   axis_count: 6

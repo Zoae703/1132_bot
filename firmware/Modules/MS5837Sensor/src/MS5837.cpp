@@ -190,25 +190,25 @@ void MS5837::setFluidDensity(float density) {
     fluidDensity = density;
 }
 
-void MS5837::read() {
+bool MS5837::read() {
     /* Has the user forgotten to call init()? */
     if (_hi2c == nullptr) {
-        return;
+        return false;
     }
 
     uint8_t buf[3] = {0, 0, 0};
 
     /* ----- D1 (pressure) ----- */
     if (!i2c_write_cmd(_hi2c, MS5837_CONVERT_D1_8192)) {
-        return;
+        return false;
     }
     HAL_Delay(20); /* Max conversion time per datasheet. */
 
     if (!i2c_write_cmd(_hi2c, MS5837_ADC_READ)) {
-        return;
+        return false;
     }
     if (!i2c_read_bytes(_hi2c, buf, 3)) {
-        return;
+        return false;
     }
     D1_pres = 0;
     D1_pres = buf[0];
@@ -217,15 +217,15 @@ void MS5837::read() {
 
     /* ----- D2 (temperature) ----- */
     if (!i2c_write_cmd(_hi2c, MS5837_CONVERT_D2_8192)) {
-        return;
+        return false;
     }
     HAL_Delay(20); /* Max conversion time per datasheet. */
 
     if (!i2c_write_cmd(_hi2c, MS5837_ADC_READ)) {
-        return;
+        return false;
     }
     if (!i2c_read_bytes(_hi2c, buf, 3)) {
-        return;
+        return false;
     }
     D2_temp = 0;
     D2_temp = buf[0];
@@ -233,6 +233,7 @@ void MS5837::read() {
     D2_temp = (D2_temp << 8) | buf[2];
 
     calculate();
+    return true;
 }
 
 void MS5837::calculate() {

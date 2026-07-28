@@ -11,6 +11,7 @@ class ControlMode(str, Enum):
     MOTOR_TEST = "MOTOR_TEST"
     WEB_MOTION = "WEB_MOTION"
     GAMEPAD = "GAMEPAD"
+    DEPTH_HOLD = "DEPTH_HOLD"
 
 
 class ControlModeConflict(RuntimeError):

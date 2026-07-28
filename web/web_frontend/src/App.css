@@ -878,6 +878,237 @@ button {
   opacity: 0.38;
 }
 
+.depth-panel__actions,
+.depth-tuning__head,
+.depth-target {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.depth-panel__actions {
+  justify-content: flex-end;
+}
+
+.depth-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.depth-target {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(8, 17, 24, 0.48);
+}
+
+.depth-target label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.depth-target input,
+.depth-tuning input {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0d1821;
+  color: #edf5fa;
+}
+
+.depth-target input {
+  width: 130px;
+}
+
+.depth-target small,
+.depth-tuning small,
+.depth-tuning__head span {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.depth-tuning {
+  margin-bottom: 14px;
+  padding: 13px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(8, 17, 24, 0.36);
+}
+
+.depth-tuning__head {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.depth-tuning__head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.depth-tuning__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.depth-tuning__grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(12, 21, 29, 0.8);
+}
+
+.depth-tuning__grid label > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.depth-tuning input:disabled,
+.depth-target input:disabled {
+  opacity: 0.48;
+}
+
+.depth-charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.depth-chart {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #081118;
+}
+
+.depth-chart__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+}
+
+.depth-chart__head strong {
+  font-size: 13px;
+}
+
+.depth-chart__head span {
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  text-align: right;
+}
+
+.depth-chart svg {
+  display: block;
+  width: 100%;
+  height: 220px;
+  overflow: visible;
+}
+
+.depth-chart__grid line {
+  stroke: #1f303d;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.depth-chart__line {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.depth-chart__line--actual {
+  stroke: #36c2b4;
+}
+
+.depth-chart__line--target {
+  stroke: #e0a73a;
+  stroke-dasharray: 6 4;
+}
+
+.depth-chart__line--error {
+  stroke: #e05252;
+}
+
+.depth-chart__line--output {
+  stroke: #eef5fa;
+  stroke-width: 2.4;
+}
+
+.depth-chart__line--p {
+  stroke: #42a5f5;
+}
+
+.depth-chart__line--i {
+  stroke: #4caf7d;
+}
+
+.depth-chart__line--d {
+  stroke: #b078e6;
+}
+
+.depth-chart__legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.depth-chart__legend span::before {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  margin-right: 5px;
+  vertical-align: middle;
+  background: currentColor;
+  content: "";
+}
+
+.depth-chart__legend .is-actual {
+  color: #36c2b4;
+}
+
+.depth-chart__legend .is-target {
+  color: #e0a73a;
+}
+
+.depth-chart__legend .is-error {
+  color: #e05252;
+}
+
+.depth-chart__legend .is-output {
+  color: #eef5fa;
+}
+
+.depth-chart__legend .is-p {
+  color: #42a5f5;
+}
+
+.depth-chart__legend .is-i {
+  color: #4caf7d;
+}
+
+.depth-chart__legend .is-d {
+  color: #b078e6;
+}
+
 .gamepad-metrics {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -1029,12 +1260,15 @@ button {
 
   .global-tuning-grid,
   .axis-control-grid,
-  .gamepad-data-grid {
+  .gamepad-data-grid,
+  .depth-charts {
     grid-template-columns: 1fr;
   }
 
   .gamepad-metrics,
-  .gamepad-command-grid {
+  .gamepad-command-grid,
+  .depth-metrics,
+  .depth-tuning__grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
@@ -1069,14 +1303,19 @@ button {
   .channel-grid,
   .output-grid,
   .gamepad-metrics,
-  .gamepad-command-grid {
+  .gamepad-command-grid,
+  .depth-metrics,
+  .depth-tuning__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .control-summary,
   .system-state,
   .motion-toolbar,
-  .axis-control-head {
+  .axis-control-head,
+  .depth-panel__actions,
+  .depth-tuning__head,
+  .depth-target {
     align-items: stretch;
     flex-direction: column;
   }

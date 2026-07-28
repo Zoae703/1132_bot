@@ -1,5 +1,6 @@
 #include "PID.h"
 #include <algorithm>
+#include <cmath>
 
 void PID::Reset() {
     PIDInfo.ref = 0;
@@ -22,17 +23,48 @@ void PID::Reset(PID_Regulator_t* pidRegulator) {
 }
 
 float PID::PIDCalc(float target, float feedback) {
+    if (!std::isfinite(target) ||
+        !std::isfinite(feedback) ||
+        !std::isfinite(PIDInfo.kp) ||
+        !std::isfinite(PIDInfo.ki) ||
+        !std::isfinite(PIDInfo.kd) ||
+        !std::isfinite(PIDInfo.componentKpMax) ||
+        !std::isfinite(PIDInfo.componentKiMax) ||
+        !std::isfinite(PIDInfo.componentKdMax) ||
+        !std::isfinite(PIDInfo.outputMax) ||
+        PIDInfo.componentKpMax < 0.0F ||
+        PIDInfo.componentKiMax < 0.0F ||
+        PIDInfo.componentKdMax < 0.0F ||
+        PIDInfo.outputMax < 0.0F) {
+        Reset();
+        return 0.0F;
+    }
+
     PIDInfo.fdb = feedback;
     PIDInfo.ref = target;
     PIDInfo.err[3] = PIDInfo.ref - PIDInfo.fdb;
     PIDInfo.componentKp = PIDInfo.err[3] * PIDInfo.kp;
-    PIDInfo.errSum += PIDInfo.err[3];
-    PIDInfo.errSum = std::clamp(PIDInfo.errSum,
-                                -1 * PIDInfo.componentKiMax / PIDInfo.ki,
-                                PIDInfo.componentKiMax / PIDInfo.ki);
+    if (PIDInfo.ki != 0.0F && PIDInfo.componentKiMax > 0.0F) {
+        PIDInfo.errSum += PIDInfo.err[3];
+        const float integral_error_limit =
+            PIDInfo.componentKiMax / std::fabs(PIDInfo.ki);
+        PIDInfo.errSum = std::clamp(
+            PIDInfo.errSum,
+            -integral_error_limit,
+            integral_error_limit);
+    } else {
+        PIDInfo.errSum = 0.0F;
+    }
 
     PIDInfo.componentKi = PIDInfo.errSum * PIDInfo.ki;
     PIDInfo.componentKd = (PIDInfo.err[3] - PIDInfo.err[2]) * PIDInfo.kd;
+
+    if (!std::isfinite(PIDInfo.componentKp) ||
+        !std::isfinite(PIDInfo.componentKi) ||
+        !std::isfinite(PIDInfo.componentKd)) {
+        Reset();
+        return 0.0F;
+    }
 
     PIDInfo.componentKp = std::clamp(PIDInfo.componentKp, -1 * PIDInfo.componentKpMax, PIDInfo.componentKpMax);
     PIDInfo.componentKi = std::clamp(PIDInfo.componentKi, -1 * PIDInfo.componentKiMax, PIDInfo.componentKiMax);

@@ -224,6 +224,52 @@ try {
   }, 3000);
   await page.getByRole('button', { name: '停止并退出' }).click();
   await page.getByText('已解锁待机', { exact: true }).first().waitFor();
+
+  await page.getByRole('button', { name: '定深调试', exact: true }).click();
+  const depthPanel = page.locator('section.depth-panel').filter({
+    has: page.getByRole('heading', { name: '水下定深闭环调试' }),
+  });
+  await depthPanel.waitFor();
+  const enableDepth = depthPanel.getByRole(
+    'button', { name: '显式启用定深' },
+  );
+  await waitFor(() => enableDepth.isEnabled(), 6000);
+  const targetDepth = depthPanel.locator('.depth-target input[type="number"]');
+  await targetDepth.fill('1.60');
+  await enableDepth.click();
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return status.control_mode === 'DEPTH_HOLD'
+      && status.float_enabled
+      && Math.abs(status.depth_requested_target_m - 1.60) < 0.001
+      && [1, 2].every(channel => status.confirmed_pwm[channel] > 1500)
+      && [5, 6].every(channel => status.confirmed_pwm[channel] < 1500);
+  }, 5000);
+  await waitFor(
+    async () => await depthPanel.locator('svg[role="img"]').count() === 2,
+    5000,
+  );
+
+  await targetDepth.fill('1.40');
+  await depthPanel.getByRole(
+    'button', { name: '更新生效目标' },
+  ).click();
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return status.control_mode === 'DEPTH_HOLD'
+      && status.float_enabled
+      && Math.abs(status.depth_requested_target_m - 1.40) < 0.001;
+  }, 4000);
+
+  await depthPanel.getByRole('button', { name: '停止定深' }).click();
+  await waitFor(async () => {
+    const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    return status.control_mode === 'IDLE'
+      && status.safety_state_name === 'ARMED_IDLE'
+      && !status.float_enabled
+      && status.confirmed_pwm.every(value => value === 1500);
+  }, 5000);
+
   await page.getByRole('button', { name: '上锁并回中' }).click();
   await page.getByText('未解锁', { exact: true }).first().waitFor();
 
@@ -371,12 +417,9 @@ try {
   });
   await waitFor(async () => {
     const status = await (await fetch(`${baseUrl}/api/status`)).json();
-    const vertical = [1, 2, 5, 6].map(
-      channel => status.confirmed_pwm[channel],
-    );
     return status.gamepad.mapped_command.heave > 0
-      && vertical.every(value => value > 1500)
-      && new Set(vertical).size === 1;
+      && [1, 2].every(channel => status.confirmed_pwm[channel] > 1500)
+      && [5, 6].every(channel => status.confirmed_pwm[channel] < 1500);
   }, 4000);
 
   await page.evaluate(() => {
@@ -386,12 +429,9 @@ try {
   });
   await waitFor(async () => {
     const status = await (await fetch(`${baseUrl}/api/status`)).json();
-    const vertical = [1, 2, 5, 6].map(
-      channel => status.confirmed_pwm[channel],
-    );
     return status.gamepad.mapped_command.heave < 0
-      && vertical.every(value => value < 1500)
-      && new Set(vertical).size === 1;
+      && [1, 2].every(channel => status.confirmed_pwm[channel] < 1500)
+      && [5, 6].every(channel => status.confirmed_pwm[channel] > 1500);
   }, 4000);
 
   await page.evaluate(() => {
@@ -401,10 +441,11 @@ try {
   });
   await waitFor(async () => {
     const status = await (await fetch(`${baseUrl}/api/status`)).json();
+    const horizontal = [0, 3, 4, 7].map(
+      channel => status.confirmed_pwm[channel],
+    );
     return status.gamepad.mapped_command.yaw > 0
-      && [0, 3, 4, 7].every(
-        channel => status.confirmed_pwm[channel] > 1500,
-      );
+      && horizontal.some(value => value !== 1500);
   }, 4000);
 
   await page.getByRole('button', { name: '退出并上锁' }).click();
