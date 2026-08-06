@@ -1,0 +1,7 @@
+{
+  "label": "STM32: build",
+  "type": "shell",
+  "command": "cmake --build build/Debug -j$(nproc)",
+  "group": "build",
+  "problemMatcher": []
+}

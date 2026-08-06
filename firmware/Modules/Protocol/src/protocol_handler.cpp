@@ -8,6 +8,7 @@
 #include "robot_data.hpp"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 
 #include <cmath>
 #include <cstdio>
@@ -144,6 +145,12 @@ void handle_arm(uint16_t sequence)
     }
     else if (!robot.actuator_output_ready)
     {
+        char msg[64];
+        std::snprintf(msg, sizeof(msg),
+            "[ARM_REJECT] state=%u fault=%u",
+            static_cast<unsigned>(robot.actuator_state),
+            static_cast<unsigned>(robot.actuator_fault_reason));
+        bp_log(msg);
         failure = ProtoNack_InternalError;
     }
     else if (robot.state == RobotState::DISARMED ||
@@ -917,6 +924,65 @@ void handle_heartbeat(const uint8_t *payload, uint16_t sequence)
 }
 
 } // namespace
+
+/* ================================================================== */
+/*  Thread-safe log queue (MPSC)                                       */
+/* ================================================================== */
+
+static StaticQueue_t protocol_log_queue_cb;
+static uint8_t protocol_log_queue_storage[
+    PROTO_LOG_QUEUE_LENGTH * sizeof(ProtocolLogEntry)];
+static QueueHandle_t protocol_log_queue = nullptr;
+static uint32_t protocol_log_drop_count = 0U;
+
+bool Protocol_LogQueueInit(void)
+{
+    if (protocol_log_queue != nullptr) return true;
+
+    protocol_log_queue = xQueueCreateStatic(
+        PROTO_LOG_QUEUE_LENGTH,
+        sizeof(ProtocolLogEntry),
+        protocol_log_queue_storage,
+        &protocol_log_queue_cb);
+
+    protocol_log_drop_count = 0U;
+    return protocol_log_queue != nullptr;
+}
+
+void Protocol_LogQueuePush(const char *message)
+{
+    if (protocol_log_queue == nullptr || message == nullptr) return;
+
+    ProtocolLogEntry entry{};
+    std::size_t len = std::strlen(message);
+    if (len >= PROTO_LOG_MSG_MAX) len = PROTO_LOG_MSG_MAX - 1U;
+    std::memcpy(entry.message, message, len);
+    entry.message[len] = '\0';
+
+    if (xQueueSend(protocol_log_queue, &entry, 0) != pdPASS) {
+        ++protocol_log_drop_count;
+    }
+}
+
+void Protocol_LogQueueDrainOne(void)
+{
+    if (protocol_log_queue == nullptr) return;
+
+    ProtocolLogEntry entry;
+    if (xQueueReceive(protocol_log_queue, &entry, 0) != pdPASS) return;
+
+    uint16_t length = static_cast<uint16_t>(std::strlen(entry.message));
+    if (length > PROTO_MAX_PAYLOAD) length = PROTO_MAX_PAYLOAD;
+    (void)bp_send_frame_priority(
+        &bp_instance, ProtoMsg_LOG_MESSAGE,
+        reinterpret_cast<const uint8_t *>(entry.message), length,
+        BP_TX_PRIORITY_NORMAL);
+}
+
+uint32_t Protocol_LogQueueDropCount(void)
+{
+    return protocol_log_drop_count;
+}
 
 extern "C" BinaryProtocol *bp_get_instance(void)
 {

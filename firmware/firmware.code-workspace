@@ -1,0 +1,24 @@
+{
+    "folders": [
+        {
+            "name": "firmware (STM32F407)",
+            "path": "."
+        }
+    ],
+    "settings": {
+        "cmake.useCMakePresets": "always",
+        "cmake.configureOnOpen": false,
+        "cortex-debug.armToolchainPrefix": "arm-none-eabi",
+        "cortex-debug.variableUseNaturalFormat": true
+    },
+    "extensions": {
+        "recommendations": [
+            "marus25.cortex-debug",
+            "ms-vscode.cmake-tools",
+            "ms-vscode.cpptools",
+            "mcu-debug.peripheral-viewer",
+            "mcu-debug.memory-view",
+            "mcu-debug.rtos-views"
+        ]
+    }
+}

@@ -53,6 +53,7 @@ struct FakePca9685 {
     bool partial_write_failure_armed = false;
     uint16_t partial_write_failure_length = 0U;
     uint16_t partial_write_bytes = 0U;
+    bool restart_written = false;
 };
 
 FakePca9685 fake{};
@@ -94,6 +95,7 @@ void write_register(uint8_t reg, uint8_t value)
     }
 
     if (reg == kMode1 && (value & kRestart) != 0U) {
+        fake.restart_written = true;
         value = static_cast<uint8_t>(value & ~kRestart);
     }
     if (reg == kPrescale &&
@@ -343,6 +345,136 @@ void test_guard_supersede_rewrites_neutral()
     expect_transaction_balanced();
 }
 
+void test_health_detects_por_signature()
+{
+    reset_fake();
+    assert(PCA9685_Init(&hi2c2));
+
+    PCA9685Diagnostics diag_before{};
+    PCA9685_GetDiagnostics(&diag_before);
+
+    /* Corrupt registers to power-on-reset values:
+     * MODE1=0x11 (SLEEP|ALLCALL), MODE2=0x04, PRE_SCALE=0x1E */
+    fake.registers[kMode1]    = 0x11U;
+    fake.registers[kMode2]    = 0x04U;
+    fake.registers[kPrescale] = 0x1EU;
+
+    const PCA9685HealthStatus status = PCA9685_CheckHealth();
+    assert(status == PCA9685_HEALTH_RESET_DETECTED);
+
+    PCA9685Diagnostics diag_after{};
+    PCA9685_GetDiagnostics(&diag_after);
+    /* Use delta to avoid cross-test pollution of global counters. */
+    assert(diag_after.health_reset_detected ==
+           diag_before.health_reset_detected + 1U);
+    assert(diag_after.health_config_mismatches ==
+           diag_before.health_config_mismatches);
+    assert(diag_after.last_mode1    == 0x11U);
+    assert(diag_after.last_mode2    == 0x04U);
+    assert(diag_after.last_prescale == 0x1EU);
+    assert(diag_after.last_snapshot_valid_mask == 0x07U);
+    expect_transaction_balanced();
+}
+
+void test_health_bus_lock_timeout()
+{
+    reset_fake();
+    assert(PCA9685_Init(&hi2c2));
+
+    fake.fail_bus_lock_once = true;
+    const PCA9685HealthStatus status = PCA9685_CheckHealth();
+    assert(status == PCA9685_HEALTH_BUS_LOCK_TIMEOUT);
+
+    PCA9685Diagnostics diag{};
+    PCA9685_GetDiagnostics(&diag);
+    assert(diag.health_bus_lock_timeouts == 1U);
+    /* Bus lock failure: no lock was acquired, so no unlock. */
+    assert(fake.lock_count == 2U);   /* 1 from Init + 1 failed */
+    assert(fake.unlock_count == 1U); /* only Init's unlock */
+    assert(!fake.bus_locked);
+}
+
+void test_health_config_mismatch()
+{
+    reset_fake();
+    assert(PCA9685_Init(&hi2c2));
+
+    PCA9685Diagnostics diag_before{};
+    PCA9685_GetDiagnostics(&diag_before);
+
+    /* Set PRE_SCALE to a non-default, non-POR value. */
+    fake.registers[kPrescale] = 100U;
+
+    const PCA9685HealthStatus status = PCA9685_CheckHealth();
+    assert(status == PCA9685_HEALTH_CONFIG_MISMATCH);
+
+    PCA9685Diagnostics diag_after{};
+    PCA9685_GetDiagnostics(&diag_after);
+    assert(diag_after.health_config_mismatches ==
+           diag_before.health_config_mismatches + 1U);
+    assert(diag_after.health_reset_detected ==
+           diag_before.health_reset_detected);
+    expect_transaction_balanced();
+}
+
+void test_recover_clears_all_led_full_off()
+{
+    reset_fake();
+    assert(PCA9685_Init(&hi2c2));
+
+    /* Force all channels to FULL_OFF, simulating a prior write failure. */
+    assert(PCA9685_ForceOutputsOff());
+    expect_all_channels_full_off();
+
+    /* Recover must clear the global FULL_OFF and rewrite neutral. */
+    fake.restart_written = false; /* Reset after Init (Init writes RESTART). */
+    assert(PCA9685_Recover());
+
+    expect_channels_neutral(kChannelCount);
+    expect_transaction_balanced();
+}
+
+void test_recover_does_not_write_restart()
+{
+    reset_fake();
+    assert(PCA9685_Init(&hi2c2));
+
+    fake.restart_written = false; /* Reset after Init. */
+    assert(PCA9685_Recover());
+    assert(!fake.restart_written);
+
+    expect_transaction_balanced();
+}
+
+void test_write_failure_increments_counter()
+{
+    reset_fake();
+    assert(PCA9685_Init(&hi2c2));
+
+    PCA9685Diagnostics diag_before{};
+    PCA9685_GetDiagnostics(&diag_before);
+
+    const int32_t pwm[kMotorChannelCount] = {
+        1600, 1600, 1600, 1600, 1600, 1600, 1600, 1600,
+    };
+
+    /* Make the batch write fail mid-transfer. */
+    fake.partial_write_failure_armed = true;
+    fake.partial_write_failure_length =
+        static_cast<uint16_t>(1U + (kRegistersPerChannel * kMotorChannelCount));
+    fake.partial_write_bytes = 5U;
+
+    bool superseded = false;
+    assert(!PCA9685_SetAllPWMGuarded(
+        pwm, nullptr, nullptr, 0U, &superseded));
+
+    PCA9685Diagnostics diag_after{};
+    PCA9685_GetDiagnostics(&diag_after);
+    assert(diag_after.write_failures == diag_before.write_failures + 1U);
+    expect_all_channels_full_off();
+    expect_transaction_balanced();
+}
+
 } // namespace
 
 extern "C" {
@@ -498,6 +630,12 @@ int main()
     test_permanent_i2c_failure_is_not_reported_ready();
     test_runtime_write_failure_and_recovery();
     test_guard_supersede_rewrites_neutral();
+    test_health_detects_por_signature();
+    test_health_bus_lock_timeout();
+    test_health_config_mismatch();
+    test_recover_clears_all_led_full_off();
+    test_recover_does_not_write_restart();
+    test_write_failure_increments_counter();
 
     std::cout << "PCA9685 host tests passed; injected all "
               << successful_init_hal_calls

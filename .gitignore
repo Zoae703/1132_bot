@@ -13,13 +13,20 @@ logs/
 
 # CubeMX
 mx.scratch
+.mxproject
 .settings/
+**/Backup/
 
-# IDE
-.vscode/
+# IDE user files (keep shared .vscode configs!)
 .idea/
 *.uvguix.*
 *.scvd
+
+# VS Code: ignore local machine overrides only
+.vscode/*.bak*
+.vscode/*.bak_*
+.vscode/ipch/
+.vscode/.browse.VC.db*
 
 # Editor / OS
 *.swp
@@ -41,11 +48,17 @@ Thumbs.db
 *.d
 *.su
 
-# CMake generated (project root)
+# Static libraries
+*.a
+
+# CMake generated
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 compile_commands.json
+
+# Machine-local CMake preset
+CMakeUserPresets.json
 
 # Clangd index
 .clangd/

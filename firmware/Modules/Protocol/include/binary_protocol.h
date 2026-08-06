@@ -187,6 +187,33 @@ BinaryProtocol *bp_get_instance(void);
 void bp_dispatch_frame(BinaryProtocol *bp, uint8_t type, uint16_t seq,
                        const uint8_t *payload, uint16_t payload_len);
 
+/* ------------------------------------------------------------------ */
+/*  Thread-safe log queue (MPSC — tasks push, CommTask drains)         */
+/* ------------------------------------------------------------------ */
+
+#define PROTO_LOG_QUEUE_LENGTH 32U
+#define PROTO_LOG_MSG_MAX      128U
+
+typedef struct {
+    char message[PROTO_LOG_MSG_MAX];
+} ProtocolLogEntry;
+
+/** Initialise the log queue.  Must be called before the scheduler starts
+ *  and before any task that may call Protocol_LogQueuePush(). */
+bool Protocol_LogQueueInit(void);
+
+/** Push a log message (task context only, zero-wait send).
+ *  The message is copied into the queue entry.  On queue full the entry
+ *  is dropped and an internal drop counter is incremented. */
+void Protocol_LogQueuePush(const char *message);
+
+/** Drain one entry and send it via bp_send_frame_priority.
+ *  Only CommTask may call this. */
+void Protocol_LogQueueDrainOne(void);
+
+/** Return the number of messages dropped due to a full queue. */
+uint32_t Protocol_LogQueueDropCount(void);
+
 #ifdef __cplusplus
 }
 #endif

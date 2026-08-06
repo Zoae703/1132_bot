@@ -116,38 +116,44 @@ if(WIN32)
         VERBATIM
     )
 else()
-    set(FLASH_OPENOCD_DEFAULT "$ENV{HOME}/.local/xpack-openocd/bin/openocd")
-    if(EXISTS "${FLASH_OPENOCD_DEFAULT}")
-        set(FLASH_OPENOCD_INIT "${FLASH_OPENOCD_DEFAULT}")
-    else()
-        find_program(FLASH_OPENOCD_INIT
-            NAMES openocd
-            DOC "OpenOCD 可执行文件"
-        )
-        if(NOT FLASH_OPENOCD_INIT)
-            set(FLASH_OPENOCD_INIT openocd)
-        endif()
-    endif()
-    set(FLASH_OPENOCD ${FLASH_OPENOCD_INIT} CACHE FILEPATH "OpenOCD 可执行文件")
+    find_program(FLASH_OPENOCD
+        NAMES openocd
+        REQUIRED
+        DOC "OpenOCD executable"
+    )
 
     add_custom_target(flash
         DEPENDS ${CMAKE_PROJECT_NAME}
         COMMAND ${FLASH_OPENOCD}
                 -f ${FLASH_OPENOCD_CFG}
                 -c "program $<TARGET_FILE:${CMAKE_PROJECT_NAME}> verify reset exit"
-        COMMENT "使用 DAP-Link 烧录 ${CMAKE_PROJECT_NAME}"
+        COMMENT "Flash ${CMAKE_PROJECT_NAME} via OpenOCD (DAP-Link)"
         USES_TERMINAL
         VERBATIM
     )
 
-    # OpenOCD GDB Server 调试目标
-    # 用法: cmake --build build/Debug --target debug-server
-    # 然后在另一个终端: gdb-multiarch build/Debug/1132_bot.elf -ex "target extended-remote :3333"
+    # OpenOCD GDB Server debug target
+    # Usage: cmake --build build/Debug --target debug-server
+    # Then: gdb-multiarch build/Debug/1132_bot.elf -ex "target extended-remote :3333"
     add_custom_target(debug-server
         COMMAND ${FLASH_OPENOCD}
                 -f ${FLASH_OPENOCD_CFG}
-        COMMENT "启动 OpenOCD GDB Server (端口 3333)，在另一个终端用 gdb-multiarch 连接"
+        COMMENT "Start OpenOCD GDB Server (port 3333). Connect with gdb-multiarch."
         USES_TERMINAL
         VERBATIM
     )
 endif()
+
+# Post-build: generate .hex and .bin
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND arm-none-eabi-objcopy -O ihex $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.hex
+    COMMAND arm-none-eabi-objcopy -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.bin
+    COMMENT "Generating .hex and .bin from ELF"
+)
+
+# Host tests (compiled with host g++, not cross-compiled)
+enable_testing()
+add_test(NAME host_tests
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/run_stm32_protocol_host_tests.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)

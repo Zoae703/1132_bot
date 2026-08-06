@@ -2,6 +2,5 @@
     "cortex-debug.armToolchainPrefix": "arm-none-eabi",
     "cortex-debug.variableUseNaturalFormat": true,
     "cmake.useCMakePresets": "always",
-    "cmake.configureOnOpen": false,
-    "cmake.sourceDirectory": "${workspaceFolder}/firmware"
+    "cmake.configureOnOpen": false
 }

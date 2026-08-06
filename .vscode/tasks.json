@@ -1,37 +1,65 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "build",
-      "type": "shell",
-      "command": "cmake --build build/Debug -j$(nproc)",
-      "group": "build",
-      "problemMatcher": []
-    },
-    {
-      "label": "STM32: build",
-      "type": "shell",
-      "command": "cmake --build build/Debug -j$(nproc)",
-      "group": "build",
-      "problemMatcher": []
-    },
-    {
-      "label": "STM32: flash DAPLink",
-      "type": "shell",
-      "command": "${config:cortex-debug.openocdPath}",
-      "args": [
-        "-f",
-        "${workspaceFolder}/openocd.cfg",
-        "-c",
-        "program ${workspaceFolder}/build/Debug/1132_bot.elf verify reset exit"
-      ],
-      "dependsOn": "STM32: build",
-      "group": "build",
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "shared"
-      }
-    }
-  ]
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "STM32: Configure Debug",
+            "type": "cmake",
+            "command": "configure",
+            "preset": "Debug",
+            "problemMatcher": []
+        },
+        {
+            "label": "STM32: Build Debug",
+            "type": "cmake",
+            "command": "build",
+            "targets": ["all"],
+            "preset": "Debug",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "STM32: Configure Release",
+            "type": "cmake",
+            "command": "configure",
+            "preset": "Release",
+            "problemMatcher": []
+        },
+        {
+            "label": "STM32: Build Release",
+            "type": "cmake",
+            "command": "build",
+            "targets": ["all"],
+            "preset": "Release",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "STM32: Flash",
+            "type": "cmake",
+            "command": "build",
+            "targets": ["flash"],
+            "preset": "Debug",
+            "problemMatcher": []
+        },
+        {
+            "label": "STM32: Clean",
+            "type": "cmake",
+            "command": "clean",
+            "preset": "Debug",
+            "problemMatcher": []
+        },
+        {
+            "label": "STM32: Check Environment",
+            "type": "process",
+            "command": "python3",
+            "args": [
+                "${workspaceFolder}/firmware/scripts/check_env.py"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        }
+    ]
 }

@@ -31,6 +31,27 @@ enum class RobotState : uint8_t {
     FAULT = 6
 };
 
+enum class ActuatorStartupState : uint8_t {
+    UNINITIALIZED = 0,
+    INITIALIZING  = 1,
+    NEUTRAL_HOLD  = 2,
+    READY         = 3,
+    RECOVERING    = 4,
+    FAULT         = 5,
+};
+
+enum class ActuatorFaultReason : uint8_t {
+    NONE = 0,
+    INIT_FAILED,
+    RECOVERY_FAILED,
+    HEALTH_BUS_LOCK_TIMEOUT,
+    HEALTH_IO_READ_FAILED,
+    HEALTH_CONFIG_MISMATCH,
+    HEALTH_RESET_DETECTED,
+    HEALTH_TCA_SELECT_FAILED,
+    OUTPUT_WRITE_FAILED,
+};
+
 struct BodyCommand {
     float surge = 0.0F;
     float sway = 0.0F;
@@ -148,6 +169,10 @@ struct RobotData {
     // Set only after PCA9685 timing and all channel registers are verified.
     // ARM and ESTOP reset remain blocked while actuator output is unavailable.
     bool actuator_output_ready = false;
+
+    // === Actuator startup state machine (written exclusively by ControlTask) ===
+    ActuatorStartupState actuator_state = ActuatorStartupState::UNINITIALIZED;
+    ActuatorFaultReason  actuator_fault_reason = ActuatorFaultReason::NONE;
 
     // === Safety state machine ===
     RobotState state = RobotState::DISARMED;

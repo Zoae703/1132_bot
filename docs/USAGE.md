@@ -37,14 +37,8 @@
 在工程根目录执行：
 
 ```bash
-cmake -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_TOOLCHAIN_FILE=/home/zoae/stm32_projects/1132_bot/cmake/gcc-arm-none-eabi.cmake \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE \
-  -S /home/zoae/stm32_projects/1132_bot \
-  -B /home/zoae/stm32_projects/1132_bot/build/Debug \
-  -G Ninja
-
-cmake --build /home/zoae/stm32_projects/1132_bot/build/Debug --
+cmake --preset Debug
+cmake --build --preset Debug
 ```
 
 构建成功后会生成：
@@ -60,7 +54,7 @@ cmake --build /home/zoae/stm32_projects/1132_bot/build/Debug --
 项目提供了 CMake 的 `flash` 目标，使用 DAP-Link/OpenOCD 脚本：
 
 ```bash
-cmake --build /home/zoae/stm32_projects/1132_bot/build/Debug --target flash
+cmake --build --preset Debug --target flash
 ```
 
 前提：
@@ -1518,7 +1512,7 @@ Python 侧可用 `protocol/shared/protocol.py` 的 `encode_frame()`、`decode_fr
 固件构建验证：
 
 ```bash
-cmake --build /home/zoae/stm32_projects/1132_bot/build/Debug --
+cmake --build --preset Debug
 ```
 
 完整自动化门禁：

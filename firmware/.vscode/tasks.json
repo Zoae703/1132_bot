@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Build Debug",
+            "type": "cmake",
+            "command": "build",
+            "targets": ["all"],
+            "preset": "Debug",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Configure Debug",
+            "type": "cmake",
+            "command": "configure",
+            "preset": "Debug",
+            "problemMatcher": []
+        }
+    ]
+}

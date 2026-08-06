@@ -1,0 +1,14 @@
+{
+  "name": "STM32F407 DAPLink OpenOCD Debug",
+  "type": "cortex-debug",
+  "request": "launch",
+  "cwd": "${workspaceFolder}",
+  "executable": "${workspaceFolder}/firmware/build/Debug/1132_bot.elf",
+  "servertype": "openocd",
+  "configFiles": [
+    "${workspaceFolder}/firmware/openocd.cfg"
+  ],
+  "gdbPath": "gdb-multiarch",
+  "runToEntryPoint": "main",
+  "showDevDebugOutput": "raw"
+}

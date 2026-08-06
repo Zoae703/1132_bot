@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "i2c.h"
 #include "robot_tasks.h"
+#include "binary_protocol.h"
 
 /* USER CODE END Includes */
 
@@ -103,6 +104,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
+  Protocol_LogQueueInit();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */

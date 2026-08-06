@@ -75,6 +75,22 @@ public:
     bool last_write_ok() const { return last_write_ok_; }
     bool recovery_required() const { return recovery_required_; }
 
+    PCA9685HealthStatus CheckHealth() {
+        if (!initialized_) return PCA9685_HEALTH_IO_READ_FAILED;
+        return PCA9685_CheckHealth();
+    }
+
+    bool Recover() {
+        initialized_ = PCA9685_Recover();
+        last_write_ok_ = initialized_;
+        recovery_required_ = !initialized_;
+        return initialized_;
+    }
+
+    void GetDiagnostics(PCA9685Diagnostics *diag) const {
+        PCA9685_GetDiagnostics(diag);
+    }
+
 private:
     static bool output_generation_matches(
         const void *context, uint32_t expected_generation)

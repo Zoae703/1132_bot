@@ -114,6 +114,7 @@ class NeutralReason(IntEnum):
     LAST_CLIENT_DISCONNECTED = 6
     FAULT = 7
     DEPTH_SENSOR = 8
+    STARTUP = 9
 
 
 class SafetyEventType(IntEnum):

@@ -67,10 +67,10 @@ void PCA9685_GetDiagnostics(PCA9685Diagnostics *diagnostics)
     *diagnostics = pca9685_diagnostics;
 }
 
-static bool PCA9685_BeginTransaction(void)
+static PCA9685TransactionStatus PCA9685_BeginTransaction(void)
 {
     if (pca_i2c == nullptr) {
-        return false;
+        return PCA9685_TXN_TCA_SELECT_FAILED;
     }
 
     if (pca_i2c == &hi2c2) {
@@ -81,15 +81,15 @@ static bool PCA9685_BeginTransaction(void)
          * by the shorter HAL timeout below.
          */
         if (!I2C2_BusLock(PCA9685_BUS_LOCK_TIMEOUT_MS)) {
-            return false;
+            return PCA9685_TXN_BUS_LOCK_TIMEOUT;
         }
         if (TCA9548A_SelectChannel(pca_i2c, PCA9685_TCA_CHANNEL) != HAL_OK) {
             I2C2_BusUnlock();
-            return false;
+            return PCA9685_TXN_TCA_SELECT_FAILED;
         }
     }
 
-    return true;
+    return PCA9685_TXN_OK;
 }
 
 static void PCA9685_EndTransaction(void)
@@ -258,7 +258,7 @@ bool PCA9685_SetPWM(uint8_t channel, uint32_t on, uint32_t off)
 {
     bool ok;
 
-    if (!PCA9685_BeginTransaction()) {
+    if (PCA9685_BeginTransaction() != PCA9685_TXN_OK) {
         return false;
     }
     ok = PCA9685_WritePwmUnlocked(channel, static_cast<uint16_t>(on),
@@ -274,7 +274,7 @@ bool PCA9685_Init(I2C_HandleTypeDef *hi2c)
 {
     ++pca9685_diagnostics.init_attempts;
     pca_i2c = hi2c;
-    if (!PCA9685_BeginTransaction()) {
+    if (PCA9685_BeginTransaction() != PCA9685_TXN_OK) {
         PCA9685_RecordFailure(PCA9685_PHASE_BEGIN_TRANSACTION);
         return false;
     }
@@ -366,10 +366,172 @@ bool PCA9685_Init(I2C_HandleTypeDef *hi2c)
 
 bool PCA9685_ForceOutputsOff()
 {
-    if (!PCA9685_BeginTransaction()) {
+    if (PCA9685_BeginTransaction() != PCA9685_TXN_OK) {
         return false;
     }
     const bool ok = PCA9685_ForceOutputsOffUnlocked();
+    PCA9685_EndTransaction();
+    return ok;
+}
+
+PCA9685HealthStatus PCA9685_CheckHealth(void)
+{
+    ++pca9685_diagnostics.health_check_count;
+
+    const PCA9685TransactionStatus txn = PCA9685_BeginTransaction();
+    if (txn == PCA9685_TXN_BUS_LOCK_TIMEOUT) {
+        ++pca9685_diagnostics.health_bus_lock_timeouts;
+        return PCA9685_HEALTH_BUS_LOCK_TIMEOUT;
+    }
+    if (txn == PCA9685_TXN_TCA_SELECT_FAILED) {
+        ++pca9685_diagnostics.health_tca_select_failures;
+        return PCA9685_HEALTH_TCA_SELECT_FAILED;
+    }
+
+    uint8_t mode1 = 0U, mode2 = 0U, prescale = 0U;
+    uint8_t valid_mask = 0U;
+
+    if (PCA9685_ReadUnlocked(PCA9685_MODE1, &mode1)) {
+        valid_mask |= 0x01U;
+    }
+    if (PCA9685_ReadUnlocked(PCA9685_MODE2, &mode2)) {
+        valid_mask |= 0x02U;
+    }
+    if (PCA9685_ReadUnlocked(PCA9685_PRESCALE, &prescale)) {
+        valid_mask |= 0x04U;
+    }
+
+    pca9685_diagnostics.last_mode1 = mode1;
+    pca9685_diagnostics.last_mode2 = mode2;
+    pca9685_diagnostics.last_prescale = prescale;
+    pca9685_diagnostics.last_snapshot_valid_mask = valid_mask;
+
+    PCA9685_EndTransaction();
+
+    if (valid_mask != 0x07U) {
+        ++pca9685_diagnostics.health_io_read_failures;
+        return PCA9685_HEALTH_IO_READ_FAILED;
+    }
+
+    /* Verify configuration bits using masks that exclude dynamic bits
+     * (RESTART is self-clearing) and reserved bits. */
+    const bool mode1_ok =
+        (mode1 & kMode1RelevantMask) == kMode1Configured;
+    const bool mode2_ok =
+        (mode2 & kMode2RelevantMask) == kMode2Configured;
+    const bool prescale_ok =
+        (prescale == PCA9685_FIXED_PRESCALE_50HZ);
+
+    if (mode1_ok && mode2_ok && prescale_ok) {
+        return PCA9685_HEALTHY;
+    }
+
+    /* Power-on-reset signature: PRE_SCALE=0x1E (default),
+     * MODE1=(SLEEP|ALLCALL)≈0x11, MODE2≈0x04. */
+    if (prescale == 0x1EU &&
+        (mode1 & kMode1RelevantMask) == (kMode1Sleep | kMode1AllCall) &&
+        (mode2 & kMode2RelevantMask) == (0x04U & kMode2RelevantMask)) {
+        ++pca9685_diagnostics.health_reset_detected;
+        return PCA9685_HEALTH_RESET_DETECTED;
+    }
+
+    ++pca9685_diagnostics.health_config_mismatches;
+    return PCA9685_HEALTH_CONFIG_MISMATCH;
+}
+
+bool PCA9685_Recover(void)
+{
+    ++pca9685_diagnostics.recover_attempts;
+
+    if (PCA9685_BeginTransaction() != PCA9685_TXN_OK) {
+        ++pca9685_diagnostics.recover_failures;
+        return false;
+    }
+
+    bool ok = false;
+    PCA9685InitFailurePhase failure_phase = PCA9685_PHASE_NONE;
+    do {
+        /* Enter SLEEP.  This interrupts PWM output — the upper layer must
+         * have already DISARMED and discarded old thrust before calling. */
+        const uint8_t sleep_mode =
+            static_cast<uint8_t>(kMode1Configured | kMode1Sleep);
+        if (!PCA9685_WriteUnlocked(PCA9685_MODE1, sleep_mode)) {
+            failure_phase = PCA9685_PHASE_RECOVER_SLEEP;
+            break;
+        }
+
+        /* Clear ALL_LED global full-off.  A prior write failure calls
+         * ForceOutputsOffUnlocked which sets ALL_LED_OFF_H.FULL_OFF=1.
+         * Global FULL_OFF overrides per-channel registers — it must be
+         * explicitly cleared before channel neutrals take effect. */
+        if (!PCA9685_WriteUnlocked(PCA9685_ALL_LED_ON_L,  0x00U) ||
+            !PCA9685_WriteUnlocked(PCA9685_ALL_LED_ON_H,  0x00U) ||
+            !PCA9685_WriteUnlocked(PCA9685_ALL_LED_OFF_L, 0x00U) ||
+            !PCA9685_WriteUnlocked(PCA9685_ALL_LED_OFF_H, 0x00U)) {
+            failure_phase = PCA9685_PHASE_FORCE_OFF;
+            break;
+        }
+
+        /* Configure registers while in SLEEP. */
+        if (!PCA9685_WriteUnlocked(PCA9685_MODE2, kMode2Configured)) {
+            failure_phase = PCA9685_PHASE_MODE2;
+            break;
+        }
+        if (!PCA9685_WriteUnlocked(
+                PCA9685_PRESCALE, PCA9685_FIXED_PRESCALE_50HZ)) {
+            failure_phase = PCA9685_PHASE_PRESCALE;
+            break;
+        }
+
+        /* Write neutral to all sixteen channels while in SLEEP.
+         * The PWM registers are reloaded now; after wake the first
+         * visible pulse is the verified neutral value.  No RESTART
+         * write is needed because we are not restoring old waveforms. */
+        int32_t neutral[kPcaChannelCount]{};
+        for (int32_t &value : neutral) {
+            value = PCA9685_PWM_NEUTRAL_US;
+        }
+        if (!PCA9685_WritePwmBatchUnlocked(
+                neutral, kPcaChannelCount)) {
+            failure_phase = PCA9685_PHASE_NEUTRAL_BATCH;
+            break;
+        }
+
+        /* Read-back verify while still in SLEEP. */
+        if (!PCA9685_VerifyConfigurationUnlocked(true)) {
+            failure_phase = PCA9685_PHASE_VERIFY_SLEEP;
+            break;
+        }
+
+        /* Wake: clear SLEEP bit, wait for oscillator to stabilise
+         * (≥500 µs per datasheet; 2 ms engineering margin). */
+        if (!PCA9685_WriteUnlocked(
+                PCA9685_MODE1, kMode1Configured)) {
+            failure_phase = PCA9685_PHASE_WAKE;
+            break;
+        }
+        HAL_Delay(2U);
+
+        /* Verify MODE1 after wake using mask (RESTART is self-clearing). */
+        uint8_t mode1 = 0U;
+        if (!PCA9685_ReadUnlocked(PCA9685_MODE1, &mode1) ||
+            (mode1 & kMode1RelevantMask) != kMode1Configured) {
+            failure_phase = PCA9685_PHASE_VERIFY_WAKE;
+            break;
+        }
+
+        ok = true;
+    } while (false);
+
+    if (!ok) {
+        ++pca9685_diagnostics.recover_failures;
+        pca9685_diagnostics.last_recover_failure_phase =
+            static_cast<uint8_t>(failure_phase);
+        (void)PCA9685_ForceOutputsOffUnlocked();
+    } else {
+        ++pca9685_diagnostics.recover_successes;
+    }
+
     PCA9685_EndTransaction();
     return ok;
 }
@@ -391,7 +553,7 @@ bool PCA9685_SetAllPWMGuarded(
         *superseded = false;
     }
 
-    if (!PCA9685_BeginTransaction()) {
+    if (PCA9685_BeginTransaction() != PCA9685_TXN_OK) {
         return false;
     }
 
@@ -420,6 +582,7 @@ bool PCA9685_SetAllPWMGuarded(
     }
 
     if (!ok) {
+        ++pca9685_diagnostics.write_failures;
         (void)PCA9685_ForceOutputsOffUnlocked();
     }
 

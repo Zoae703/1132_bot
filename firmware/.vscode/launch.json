@@ -1,0 +1,46 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "DAPLink 烧录+调试 (OpenOCD)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+            "servertype": "openocd",
+            "configFiles": [
+                "${workspaceFolder}/openocd.cfg"
+            ],
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "parsed",
+            "preLaunchTask": "CMake: Build Debug",
+            "svdFile": "",
+            "gdbPath": "gdb-multiarch",
+            "postLaunchCommands": [
+                "monitor arm semihosting enable"
+            ],
+            "liveWatch": {
+                "enabled": true,
+                "samples": 50
+            }
+        },
+        {
+            "name": "DAPLink 调试 (不烧录，仅附加)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+            "servertype": "openocd",
+            "configFiles": [
+                "${workspaceFolder}/openocd.cfg"
+            ],
+            "showDevDebugOutput": "parsed",
+            "svdFile": "",
+            "gdbPath": "gdb-multiarch",
+            "liveWatch": {
+                "enabled": true,
+                "samples": 50
+            }
+        }
+    ]
+}

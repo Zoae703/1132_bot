@@ -141,6 +141,7 @@ typedef enum {
     ProtoNeutral_LAST_CLIENT_DISCONNECTED = 6,
     ProtoNeutral_FAULT                    = 7,
     ProtoNeutral_DEPTH_SENSOR             = 8,
+    ProtoNeutral_STARTUP                  = 9,
 } ProtoNeutralReason;
 
 /* ------------------------------------------------------------------ */
