@@ -9,7 +9,22 @@
         "cmake.useCMakePresets": "always",
         "cmake.configureOnOpen": false,
         "cortex-debug.armToolchainPrefix": "arm-none-eabi",
-        "cortex-debug.variableUseNaturalFormat": true
+        "cortex-debug.variableUseNaturalFormat": true,
+        "cmake.debugConfig": {
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "configFiles": [
+                "${workspaceFolder}/openocd.cfg"
+            ],
+            "gdbPath": "gdb-multiarch",
+            "executable": "${workspaceFolder}/build/Debug/1132_bot.elf",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "parsed",
+            "postLaunchCommands": [
+                "monitor arm semihosting enable"
+            ]
+        }
     },
     "extensions": {
         "recommendations": [

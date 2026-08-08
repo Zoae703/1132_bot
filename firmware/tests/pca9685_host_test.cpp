@@ -262,9 +262,8 @@ void test_permanent_i2c_failure_is_not_reported_ready()
     robot = RobotData{};
     PCA9685Driver driver;
     assert(!driver.Init());
-    assert(!driver.is_ready());
-    assert(!driver.last_write_ok());
-    assert(driver.recovery_required());
+    assert(!driver.IsInitialized());
+    assert(!driver.LastWriteSucceeded());
     expect_transaction_balanced();
 }
 
@@ -274,8 +273,7 @@ void test_runtime_write_failure_and_recovery()
     robot = RobotData{};
     PCA9685Driver driver;
     assert(driver.Init());
-    assert(driver.is_ready());
-    assert(!driver.recovery_required());
+    assert(driver.IsInitialized());
     expect_channels_neutral(kChannelCount);
 
     for (uint8_t channel = 0U; channel < kMotorChannelCount; ++channel) {
@@ -283,31 +281,26 @@ void test_runtime_write_failure_and_recovery()
             static_cast<int32_t>(1550U + (5U * channel));
     }
     ++robot.pwm_output_generation;
-    robot.actuator_output_ready = true;
 
     fake.partial_write_failure_armed = true;
     fake.partial_write_failure_length =
         static_cast<uint16_t>(
             1U + (kRegistersPerChannel * kMotorChannelCount));
     fake.partial_write_bytes = 7U;
-    assert(!driver.Update());
+    assert(!driver.SetOutputs(robot.pwm, kMotorChannelCount));
     assert(fake.failure_triggered);
     assert(!fake.partial_write_failure_armed);
-    assert(!driver.is_ready());
-    assert(!driver.last_write_ok());
-    assert(driver.recovery_required());
-    assert(!robot.actuator_output_ready);
+    assert(!driver.IsInitialized());
+    assert(!driver.LastWriteSucceeded());
     expect_all_channels_full_off();
     expect_transaction_balanced();
 
     fake.fail_once_call = 0U;
     fake.failure_triggered = false;
-    assert(driver.RecoverToNeutral());
-    assert(driver.is_ready());
-    assert(driver.last_write_ok());
-    assert(!driver.recovery_required());
-    // ControlTask owns the transition back to protocol-visible readiness.
-    assert(!robot.actuator_output_ready);
+    assert(driver.Recover());
+    assert(driver.IsInitialized());
+    assert(driver.LastWriteSucceeded());
+    // Recover writes neutral to all channels (chip-level, not RobotData).
     expect_channels_neutral(kChannelCount);
     expect_transaction_balanced();
 }

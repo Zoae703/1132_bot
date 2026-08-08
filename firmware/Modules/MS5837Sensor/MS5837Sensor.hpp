@@ -13,7 +13,7 @@
  * bus or an I2C multiplexer.
  */
 extern "C" I2C_HandleTypeDef hi2c2;
-extern volatile bool pca9685_recovery_in_progress;
+extern "C" bool I2C2Bus_IsRecovering(void);
 
 /* xy_robotkit C++ lifecycle adapter for the BlueRobotics MS5837-30BA / 02BA
  * pressure & temperature sensor (STM32 HAL port).
@@ -46,7 +46,7 @@ public:
           ready_(false) {}
 
     void Init() {
-        if (pca9685_recovery_in_progress) {
+        if (I2C2Bus_IsRecovering()) {
             ready_ = false;
             taskENTER_CRITICAL();
             robot.depth_sensor_ready = false;
@@ -72,7 +72,7 @@ public:
     }
 
     void Update() {
-        if (pca9685_recovery_in_progress) {
+        if (I2C2Bus_IsRecovering()) {
             return;
         }
         uint32_t now = HAL_GetTick();

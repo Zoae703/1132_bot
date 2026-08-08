@@ -10,7 +10,7 @@
 #include "IST8310Sensor.hpp"
 #include "MahonyAHRS.hpp"
 #include "PIDController.hpp"
-#include "PCA9685Driver.hpp"
+#include "PCA9685ThrusterModule.hpp"
 #include "MotorControl.hpp"
 #include "Communication.hpp"
 #include "Protocol.hpp"
@@ -20,7 +20,7 @@ static MS5837Sensor     depth_sensor(997, 100);
 static IST8310Sensor    ist8310(10);
 static MahonyAHRSModule ahrs(200.0f, 5.0f, 0.0f);
 static PIDController     pid;       // no-op, included for completeness
-static PCA9685Driver     pca9685(50);
+static PCA9685ThrusterModule pca9685;
 static MotorControl      motor_control;
 static Communication     comm;
 
@@ -50,7 +50,7 @@ inline void XYRobotLoop() {
     motor_control.Update();   // sensors/targets -> PID cascade -> robot.pwm[8]
 
     // 5. Actuator output
-    pca9685.Update();         // robot.pwm[8] -> I2C to PCA9685
+    pca9685.Update(HAL_GetTick());
 
     HAL_Delay(5);
 }

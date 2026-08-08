@@ -68,6 +68,18 @@ void I2C2_BusUnlock(void)
   }
 }
 
+static volatile bool i2c2_bus_recovering = true;
+
+void I2C2Bus_SetRecovering(bool recovering)
+{
+  i2c2_bus_recovering = recovering;
+}
+
+bool I2C2Bus_IsRecovering(void)
+{
+  return i2c2_bus_recovering;
+}
+
 /* USER CODE END 0 */
 
 I2C_HandleTypeDef hi2c2;

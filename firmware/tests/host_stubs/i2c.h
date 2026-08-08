@@ -10,5 +10,7 @@ extern I2C_HandleTypeDef hi2c2;
 
 bool I2C2_BusLock(uint32_t timeout_ms);
 void I2C2_BusUnlock(void);
+void I2C2Bus_SetRecovering(bool recovering);
+bool I2C2Bus_IsRecovering(void);
 
 }

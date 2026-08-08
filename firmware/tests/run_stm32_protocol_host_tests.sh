@@ -21,8 +21,8 @@ g++ -std=c++17 -Wall -Wextra -Werror \
 "$output"
 
 g++ -std=c++17 -Wall -Wextra -Werror \
-  -I"$repo_root/tests/host_stubs" \
   -I"$repo_root/Modules/Protocol/include" \
+  -I"$repo_root/tests/host_stubs" \
   -I"$repo_root/Modules/DataBus/include" \
   -I"$repo_root/protocol/shared" \
   -x c++ \
@@ -76,10 +76,15 @@ g++ -std=c++17 -Wall -Wextra -Werror \
 
 g++ -std=c++17 -Wall -Wextra -Werror \
   -I"$repo_root/tests/host_stubs" \
+  -I"$repo_root/Modules/Protocol/include" \
+  -I"$repo_root/protocol/shared" \
+  -I"$repo_root/Modules/PCA9685Driver" \
+  -I"$repo_root/Modules/PCA9685Driver/include" \
   -I"$repo_root/Modules/DataBus" \
   -I"$repo_root/Modules/DataBus/include" \
   -x c++ \
   "$repo_root/tests/actuator_startup_test.cpp" \
+  "$repo_root/Modules/PCA9685Driver/src/ThrusterOutputManager.cpp" \
   "$repo_root/Modules/DataBus/src/robot_data.cpp" \
   -o "$actuator_output"
 

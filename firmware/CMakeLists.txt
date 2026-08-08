@@ -142,6 +142,18 @@ else()
         USES_TERMINAL
         VERBATIM
     )
+
+    # 一键调试: 启动 OpenOCD + 自动连接 gdb-multiarch, 下载固件并停在 main
+    # Usage: cmake --build build/Debug --target debug
+    add_custom_target(debug
+        DEPENDS ${CMAKE_PROJECT_NAME}
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tools/debug.sh
+                $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+                ${FLASH_OPENOCD_CFG}
+        COMMENT "OpenOCD + gdb 交互调试 (下载固件, 停在 main)"
+        USES_TERMINAL
+        VERBATIM
+    )
 endif()
 
 # Post-build: generate .hex and .bin

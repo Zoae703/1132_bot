@@ -266,6 +266,11 @@ extern "C" HAL_StatusTypeDef TCA9548A_DisableAll(
     return HAL_OK;
 }
 
+extern "C" bool I2C2Bus_IsRecovering(void)
+{
+    return false;
+}
+
 int main()
 {
     test_low_level_read_success_and_failure();
